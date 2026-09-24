@@ -10,8 +10,7 @@
     if (real.size.height <= 0 || real.size.width <= 0) return real;
     
     CGFloat h = real.size.height;
-    CGFloat w = h * (16.0 / 10.0);
-    // Центрируем новый прямоугольник относительно старого
+    CGFloat w = h * (4.0 / 3.0); // <-- ТУТ 4:3
     CGFloat x = real.origin.x + (real.size.width - w) / 2.0;
     return CGRectMake(x, real.origin.y, w, h);
 }
