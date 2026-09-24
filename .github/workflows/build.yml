@@ -19,6 +19,7 @@ jobs:
             -miphoneos-version-min=16.0 \
             -framework UIKit \
             -framework QuartzCore \
+            -framework CoreGraphics \
             -framework Foundation \
             -o stretch.dylib \
             Tweak.m
