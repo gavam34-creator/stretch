@@ -1,9 +1,7 @@
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
-#import <substrate.h>
 
 static CGFloat targetAspect = 16.0 / 10.0;
-
 static CGRect (*orig_bounds)(id, SEL);
 
 static CGRect hook_bounds(id self, SEL _cmd) {
@@ -13,6 +11,10 @@ static CGRect hook_bounds(id self, SEL _cmd) {
     return CGRectMake(real.origin.x, real.origin.y, w, h);
 }
 
-%ctor {
-    MSHookMessageEx(objc_getClass("UIScreen"), @selector(bounds), (IMP)&hook_bounds, (IMP*)&orig_bounds);
+__attribute__((constructor))
+static void init_hook(void) {
+    Class cls = objc_getClass("UIScreen");
+    Method m = class_getInstanceMethod(cls, @selector(bounds));
+    orig_bounds = (CGRect (*)(id, SEL))method_getImplementation(m);
+    method_setImplementation(m, (IMP)hook_bounds);
 }
