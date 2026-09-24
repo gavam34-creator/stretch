@@ -1,0 +1,30 @@
+name: Build Tweak
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Theos
+        run: |
+          sudo apt update
+          sudo apt install -y git make clang perl fakeroot curl
+          git clone --recursive https://github.com/theos/theos.git $HOME/theos
+          echo "THEOS=$HOME/theos" >> $GITHUB_ENV
+          echo "$HOME/theos/bin" >> $GITHUB_PATH
+
+      - name: Build
+        run: make package
+
+      - name: Upload dylib
+        uses: actions/upload-artifact@v4
+        with:
+          name: Stretch-dylib
+          path: .theos/obj/debug/*.dylib
