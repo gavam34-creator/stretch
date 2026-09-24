@@ -7,23 +7,44 @@ on:
 
 jobs:
   build:
-    runs-on: macos-latest
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Install Dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y git make clang perl fakeroot curl wget unzip xz-utils
+
       - name: Install Theos
-        uses: Randomblock1/theos-action@v1
-        with:
-          theos-dir: 'theos'
-          theos-src: 'https://github.com/theos/theos'
-          theos-sdks: 'https://github.com/theos/sdks'
+        run: |
+          export THEOS=$HOME/theos
+          git clone --recursive https://github.com/theos/theos.git $THEOS
+          echo "THEOS=$THEOS" >> $GITHUB_ENV
+          echo "$THEOS/bin" >> $GITHUB_PATH
+
+      - name: Download iOS SDK
+        run: |
+          mkdir -p $THEOS/sdks
+          cd $THEOS/sdks
+          wget -q https://github.com/theos/sdks/archive/refs/heads/master.zip -O master.zip
+          unzip -q master.zip
+          mv sdks-master/* ./
+          rm -rf sdks-master master.zip
+          ls -la $THEOS/sdks
+
+      - name: Download LLVM Toolchain
+        run: |
+          mkdir -p $THEOS/toolchain/linux/iphone
+          cd $THEOS/toolchain/linux/iphone
+          wget -q https://github.com/sbingner/llvm-project/releases/download/v10.0.0-1/linux-ios-arm64e-clang-toolchain.tar.lzma -O toolchain.tar.lzma
+          tar -xf toolchain.tar.lzma
+          rm toolchain.tar.lzma
+          ls -la
 
       - name: Build
-        run: |
-          export THEOS=$GITHUB_WORKSPACE/theos
-          export PATH=$THEOS/bin:$PATH
-          make package
+        run: make package
 
       - name: Upload dylib
         uses: actions/upload-artifact@v4
