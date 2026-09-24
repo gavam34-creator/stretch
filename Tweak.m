@@ -2,14 +2,12 @@
 #import <objc/runtime.h>
 #import <QuartzCore/QuartzCore.h>
 
-static CALayer *g_target = nil;
-static BOOL g_active = NO;
+static UIView *g_gameView = nil;
+static BOOL    g_active   = NO;
 
-static CGRect fs(void) {
-    return [UIScreen mainScreen].bounds;
-}
+static CGRect fs(void) { return [UIScreen mainScreen].bounds; }
 
-static CALayer *findLayer(void) {
+static UIWindow *getWindow(void) {
     UIWindow *w = nil;
     if (@available(iOS 13.0, *)) {
         for (UIScene *s in [UIApplication sharedApplication].connectedScenes) {
@@ -19,49 +17,37 @@ static CALayer *findLayer(void) {
             }
         }
     }
-    if (!w) w = [UIApplication sharedApplication].windows.firstObject;
-    if (!w) return nil;
+    return w ?: [UIApplication sharedApplication].windows.firstObject;
+}
 
-    CGFloat minArea = fs().size.width * fs().size.height * 0.3f;
-    NSMutableArray *q = [NSMutableArray arrayWithObject:w.layer];
+static UIView *findGameView(void) {
+    UIWindow *w = getWindow();
+    if (!w) return nil;
+    CGFloat minArea = fs().size.width * fs().size.height * 0.25f;
+    NSMutableArray *q = [NSMutableArray arrayWithObject:w];
     while (q.count) {
-        CALayer *l = q.firstObject; [q removeObjectAtIndex:0];
-        if ([NSStringFromClass(l.class) isEqualToString:@"CAMetalLayer"]) {
-            if (l.bounds.size.width * l.bounds.size.height >= minArea)
-                return l;
+        UIView *v = q.firstObject; [q removeObjectAtIndex:0];
+        if ([NSStringFromClass(v.layer.class) isEqualToString:@"CAMetalLayer"]) {
+            CGFloat a = v.bounds.size.width * v.bounds.size.height;
+            if (a >= minArea) return v;
         }
-        if (l.sublayers) [q addObjectsFromArray:l.sublayers];
+        [q addObjectsFromArray:v.subviews];
     }
     return nil;
 }
 
-static void applyStretch(CALayer *l) {
-    CGRect full = fs();
-    [CATransaction begin];
-    [CATransaction setDisableActions:YES];
-    l.frame           = full;
-    l.position        = CGPointMake(CGRectGetMidX(full), CGRectGetMidY(full));
-    l.contentsGravity = kCAGravityResize;
-    l.contentsRect    = CGRectMake(0, 0, 1, 1);
-    [CATransaction commit];
+static void applyStretch(UIView *v) {
+    CGRect full   = fs();
+    CGFloat sx    = full.size.width  / v.bounds.size.width;
+    CGFloat sy    = full.size.height / v.bounds.size.height;
+    v.transform   = CGAffineTransformMakeScale(sx, sy);
+    v.center      = CGPointMake(CGRectGetMidX(full), CGRectGetMidY(full));
 }
 
-static void (*orig_setFrame)(CALayer *, SEL, CGRect);
-static void hook_setFrame(CALayer *self, SEL _cmd, CGRect frame) {
-    if (g_active && self == g_target) {
-        orig_setFrame(self, _cmd, fs());
-        return;
-    }
-    orig_setFrame(self, _cmd, frame);
-}
-
-static void (*orig_setContentsGravity)(CALayer *, SEL, NSString *);
-static void hook_setContentsGravity(CALayer *self, SEL _cmd, NSString *gravity) {
-    if (g_active && self == g_target) {
-        orig_setContentsGravity(self, _cmd, kCAGravityResize);
-        return;
-    }
-    orig_setContentsGravity(self, _cmd, gravity);
+static void (*orig_setTransform)(UIView *, SEL, CGAffineTransform);
+static void hook_setTransform(UIView *self, SEL _cmd, CGAffineTransform t) {
+    if (g_active && self == g_gameView) return;
+    orig_setTransform(self, _cmd, t);
 }
 
 @interface VNTATicker : NSObject
@@ -77,34 +63,22 @@ static void hook_setContentsGravity(CALayer *self, SEL _cmd, NSString *gravity) 
     });
 }
 - (void)tick:(CADisplayLink *)dl {
-    if (!g_target) {
-        g_target = findLayer();
-        if (g_target) {
-            g_active = YES;
-            applyStretch(g_target);
-        }
+    if (!g_gameView) {
+        g_gameView = findGameView();
+        if (g_gameView) { g_active = YES; applyStretch(g_gameView); }
+        return;
     }
-    if (!g_target) return;
-    if (!CGRectEqualToRect(g_target.frame, fs()) ||
-        ![g_target.contentsGravity isEqualToString:kCAGravityResize]) {
-        applyStretch(g_target);
-    }
+    CGAffineTransform cur = g_gameView.transform;
+    if (fabs(cur.a - 1.0f) < 0.01f) applyStretch(g_gameView);
 }
 @end
 
 __attribute__((constructor))
 static void init(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
-        Class cls = [CALayer class];
-
-        Method mf = class_getInstanceMethod(cls, @selector(setFrame:));
-        orig_setFrame = (void *)method_getImplementation(mf);
-        method_setImplementation(mf, (IMP)hook_setFrame);
-
-        Method mg = class_getInstanceMethod(cls, @selector(setContentsGravity:));
-        orig_setContentsGravity = (void *)method_getImplementation(mg);
-        method_setImplementation(mg, (IMP)hook_setContentsGravity);
-
+        Method m = class_getInstanceMethod([UIView class], @selector(setTransform:));
+        orig_setTransform = (void *)method_getImplementation(m);
+        method_setImplementation(m, (IMP)hook_setTransform);
         [VNTATicker start];
     });
 }
