@@ -7,44 +7,23 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: macos-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Dependencies
-        run: |
-          sudo apt update
-          sudo apt install -y git make clang perl fakeroot curl wget unzip
-
       - name: Install Theos
-        run: |
-          export THEOS=$HOME/theos
-          git clone --recursive https://github.com/theos/theos.git $THEOS
-          echo "THEOS=$THEOS" >> $GITHUB_ENV
-          echo "$THEOS/bin" >> $GITHUB_PATH
-
-      - name: Download Toolchain
-        run: |
-          mkdir -p $THEOS/toolchain/linux/iphone
-          cd $THEOS/toolchain/linux/iphone
-          wget -q https://github.com/theos/toolchain/releases/latest/download/toolchain-iphoneos.tar.xz
-          tar -xf toolchain-iphoneos.tar.xz
-          rm toolchain-iphoneos.tar.xz
-          ls -la
-
-      - name: Download iOS SDK
-        run: |
-          mkdir -p $THEOS/sdks
-          cd $THEOS/sdks
-          wget -q https://github.com/theos/sdks/archive/refs/heads/master.zip -O master.zip
-          unzip -q master.zip
-          mv sdks-master/* ./
-          rm -rf sdks-master master.zip
-          ls -la $THEOS/sdks
+        uses: Randomblock1/theos-action@v1
+        with:
+          theos-dir: 'theos'
+          theos-src: 'https://github.com/theos/theos'
+          theos-sdks: 'https://github.com/theos/sdks'
 
       - name: Build
-        run: make package
+        run: |
+          export THEOS=$GITHUB_WORKSPACE/theos
+          export PATH=$THEOS/bin:$PATH
+          make package
 
       - name: Upload dylib
         uses: actions/upload-artifact@v4
