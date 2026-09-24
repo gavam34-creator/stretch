@@ -1,20 +1,32 @@
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 
-static CGFloat targetAspect = 16.0 / 10.0;
-static CGRect (*orig_bounds)(id, SEL);
+@interface UIScreen (Stretch)
+@end
 
-static CGRect hook_bounds(id self, SEL _cmd) {
-    CGRect real = orig_bounds(self, _cmd);
+@implementation UIScreen (Stretch)
+- (CGRect)stretch_bounds {
+    CGRect real = [self stretch_bounds];
+    if (real.size.height <= 0 || real.size.width <= 0) return real;
+    
     CGFloat h = real.size.height;
-    CGFloat w = h * targetAspect;
-    return CGRectMake(real.origin.x, real.origin.y, w, h);
+    CGFloat w = h * (16.0 / 10.0);
+    // Центрируем новый прямоугольник относительно старого
+    CGFloat x = real.origin.x + (real.size.width - w) / 2.0;
+    return CGRectMake(x, real.origin.y, w, h);
 }
+@end
 
 __attribute__((constructor))
 static void init_hook(void) {
-    Class cls = objc_getClass("UIScreen");
-    Method m = class_getInstanceMethod(cls, @selector(bounds));
-    orig_bounds = (CGRect (*)(id, SEL))method_getImplementation(m);
-    method_setImplementation(m, (IMP)hook_bounds);
+    dispatch_async(dispatch_get_main_queue(), ^{
+        Class cls = objc_getClass("UIScreen");
+        if (!cls) return;
+        
+        Method original = class_getInstanceMethod(cls, @selector(bounds));
+        Method replacement = class_getInstanceMethod(cls, @selector(stretch_bounds));
+        if (original && replacement) {
+            method_exchangeImplementations(original, replacement);
+        }
+    });
 }
