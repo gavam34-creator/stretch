@@ -12,13 +12,28 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Theos
+      - name: Install Dependencies
         run: |
           sudo apt update
-          sudo apt install -y git make clang perl fakeroot curl
-          git clone --recursive https://github.com/theos/theos.git $HOME/theos
-          echo "THEOS=$HOME/theos" >> $GITHUB_ENV
-          echo "$HOME/theos/bin" >> $GITHUB_PATH
+          sudo apt install -y git make clang perl fakeroot curl wget unzip
+
+      - name: Install Theos
+        run: |
+          export THEOS=$HOME/theos
+          git clone --recursive https://github.com/theos/theos.git $THEOS
+          echo "THEOS=$THEOS" >> $GITHUB_ENV
+          echo "$THEOS/bin" >> $GITHUB_PATH
+
+      - name: Download iOS SDK
+        run: |
+          mkdir -p $THEOS/sdks
+          cd $THEOS/sdks
+          wget -q https://github.com/theos/sdks/archive/refs/heads/master.zip -O master.zip
+          unzip -q master.zip
+          mv sdks-master/* ./
+          rm -rf sdks-master master.zip
+          echo "SDKs installed:"
+          ls -la $THEOS/sdks
 
       - name: Build
         run: make package
