@@ -1,0 +1,9 @@
+Package: com.bypass.stretch
+Name: Stretch
+Version: 0.0.1
+Architecture: iphoneos-arm
+Description: Aspect ratio stretch for PUBG VNG
+Maintainer: Jack
+Author: Jack
+Section: Tweaks
+Depends: mobilesubstrate
