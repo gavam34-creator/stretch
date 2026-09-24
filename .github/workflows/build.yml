@@ -32,16 +32,17 @@ jobs:
           unzip -q master.zip
           mv sdks-master/* ./
           rm -rf sdks-master master.zip
-          ls -la $THEOS/sdks
 
-      - name: Download LLVM Toolchain
+      - name: Download Toolchain from kirb
         run: |
           mkdir -p $THEOS/toolchain/linux/iphone
           cd $THEOS/toolchain/linux/iphone
-          wget -q https://github.com/sbingner/llvm-project/releases/download/v10.0.0-1/linux-ios-arm64e-clang-toolchain.tar.lzma -O toolchain.tar.lzma
+          wget -q https://github.com/kirb/llvm-project/releases/download/v10.0.0-1/linux-ios-arm64e-clang-toolchain.tar.lzma -O toolchain.tar.lzma
           tar -xf toolchain.tar.lzma
           rm toolchain.tar.lzma
+          echo "Toolchain contents:"
           ls -la
+          find . -name "clang" -type f
 
       - name: Build
         run: make package
