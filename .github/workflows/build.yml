@@ -1,33 +1,33 @@
-name: Build Dylib
+name: Build
 
 on:
   push:
-    branches: [ main ]
+    branches: [main]
   workflow_dispatch:
 
 jobs:
   build:
-    runs-on: macos-latest
+    runs-on: macos-14
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Compile dylib with clang
+      - name: Compile
         run: |
-          xcrun --sdk iphoneos clang -arch arm64 \
+          xcrun --sdk iphoneos clang \
+            -arch arm64e \
             -dynamiclib \
+            -miphoneos-version-min=16.0 \
             -framework UIKit \
+            -framework QuartzCore \
             -framework Foundation \
-            -install_name @executable_path/Frameworks/Stretch.dylib \
-            -o Stretch.dylib Tweak.m
+            -o stretch.dylib \
+            Tweak.m
 
-      - name: Verify dylib
-        run: |
-          ls -la Stretch.dylib
-          file Stretch.dylib
+      - name: Sign
+        run: codesign --force --sign - stretch.dylib
 
-      - name: Upload dylib
+      - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: Stretch-dylib
-          path: Stretch.dylib
+          name: stretch
+          path: stretch.dylib
