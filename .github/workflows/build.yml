@@ -24,6 +24,15 @@ jobs:
           echo "THEOS=$THEOS" >> $GITHUB_ENV
           echo "$THEOS/bin" >> $GITHUB_PATH
 
+      - name: Download Toolchain
+        run: |
+          mkdir -p $THEOS/toolchain/linux/iphone
+          cd $THEOS/toolchain/linux/iphone
+          wget -q https://github.com/theos/toolchain/releases/latest/download/toolchain-iphoneos.tar.xz
+          tar -xf toolchain-iphoneos.tar.xz
+          rm toolchain-iphoneos.tar.xz
+          ls -la
+
       - name: Download iOS SDK
         run: |
           mkdir -p $THEOS/sdks
@@ -32,7 +41,6 @@ jobs:
           unzip -q master.zip
           mv sdks-master/* ./
           rm -rf sdks-master master.zip
-          echo "SDKs installed:"
           ls -la $THEOS/sdks
 
       - name: Build
