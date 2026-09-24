@@ -1,10 +1,8 @@
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
-#import <QuartzCore/QuartzCore.h>
 
 static CGFloat targetAspect = 4.0 / 3.0;
 
-// --- Хук UIScreen.bounds ---
 @interface UIScreen (Stretch)
 @end
 @implementation UIScreen (Stretch)
@@ -17,7 +15,6 @@ static CGFloat targetAspect = 4.0 / 3.0;
 }
 @end
 
-// --- Хук UIWindow.bounds ---
 @interface UIWindow (Stretch)
 @end
 @implementation UIWindow (Stretch)
@@ -30,10 +27,9 @@ static CGFloat targetAspect = 4.0 / 3.0;
 }
 @end
 
-// --- Форсим растяжение всех слоёв (убирает чёрные полосы) ---
 static void applyStretch(CALayer *layer) {
     if (!layer) return;
-    layer.contentsGravity = kCAGravityResize;
+    layer.contentsGravity = @"resize";
     NSArray *sublayers = layer.sublayers;
     for (CALayer *sub in sublayers) {
         applyStretch(sub);
@@ -67,7 +63,6 @@ static void init_hook(void) {
             Method repl = class_getInstanceMethod(windowCls, @selector(stretch_bounds));
             if (orig && repl) method_exchangeImplementations(orig, repl);
         }
-        // Каждые 2 секунды форсим растяжение слоёв — лечит полосы
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_BACKGROUND, 0), ^{
             while (1) {
                 dispatch_async(dispatch_get_main_queue(), ^{
