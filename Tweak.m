@@ -3,7 +3,6 @@
 
 static CGFloat targetAspect = 4.0 / 3.0;
 
-// --- Хук UIScreen.bounds ---
 @interface UIScreen (Stretch)
 @end
 @implementation UIScreen (Stretch)
@@ -16,36 +15,43 @@ static CGFloat targetAspect = 4.0 / 3.0;
 }
 @end
 
-// --- Принудительное центрирование и растягивание окна ---
 static void applyStretchToWindow(UIWindow *window) {
     if (!window) return;
-    
-    // Получаем физический размер экрана в точках
-    UIScreen *screen = [UIScreen mainScreen];
+
+    UIScreen *screen = [window screen];
+    if (!screen) return;
+
     CGRect nativeBounds = [screen nativeBounds];
     CGFloat scale = [screen scale];
     if (scale <= 0) scale = 1.0;
-    
+
     CGFloat physW = nativeBounds.size.width / scale;
     CGFloat physH = nativeBounds.size.height / scale;
-    
     if (physW <= 0 || physH <= 0) return;
-    
-    // Текущий размер окна (должен быть 4:3 после хука UIScreen)
+
     CGSize winSize = window.bounds.size;
     if (winSize.width <= 0 || winSize.height <= 0) return;
-    
-    // Сбрасываем предыдущий трансформ, чтобы не накапливать
-    window.layer.transform = CATransform3DIdentity;
-    
-    // Считаем, во сколько раз нужно растянуть
+
     CGFloat scaleX = physW / winSize.width;
     CGFloat scaleY = physH / winSize.height;
-    
-    // Применяем масштаб
-    window.layer.transform = CATransform3DMakeScale(scaleX, scaleY, 1.0);
-    
-    // Жёстко ставим окно в центр экрана
+
+    // Сброс трансформа (ручной identity, без QuartzCore)
+    CATransform3D identity;
+    identity.m11 = 1.0; identity.m12 = 0; identity.m13 = 0; identity.m14 = 0;
+    identity.m21 = 0; identity.m22 = 1.0; identity.m23 = 0; identity.m24 = 0;
+    identity.m31 = 0; identity.m32 = 0; identity.m33 = 1.0; identity.m34 = 0;
+    identity.m41 = 0; identity.m42 = 0; identity.m43 = 0; identity.m44 = 1.0;
+    window.layer.transform = identity;
+
+    // Масштаб (ручной, без QuartzCore)
+    CATransform3D scaleT;
+    scaleT.m11 = scaleX; scaleT.m12 = 0;      scaleT.m13 = 0; scaleT.m14 = 0;
+    scaleT.m21 = 0;      scaleT.m22 = scaleY; scaleT.m23 = 0; scaleT.m24 = 0;
+    scaleT.m31 = 0;      scaleT.m32 = 0;      scaleT.m33 = 1.0; scaleT.m34 = 0;
+    scaleT.m41 = 0;      scaleT.m42 = 0;      scaleT.m43 = 0; scaleT.m44 = 1.0;
+    window.layer.transform = scaleT;
+
+    // Центрируем окно на физическом экране
     window.center = CGPointMake(physW / 2.0, physH / 2.0);
 }
 
@@ -55,15 +61,13 @@ static void init_hook(void) {
                                                       object:nil
                                                        queue:[NSOperationQueue mainQueue]
                                                   usingBlock:^(NSNotification *note) {
-        // Ставим хук на UIScreen
         Class cls = objc_getClass("UIScreen");
         if (cls) {
             Method orig = class_getInstanceMethod(cls, @selector(bounds));
             Method repl = class_getInstanceMethod(cls, @selector(stretch_bounds));
             if (orig && repl) method_exchangeImplementations(orig, repl);
         }
-        
-        // Цикл для постоянного контроля (игра может пересоздавать окна)
+
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_BACKGROUND, 0), ^{
             while (1) {
                 dispatch_async(dispatch_get_main_queue(), ^{
@@ -77,7 +81,7 @@ static void init_hook(void) {
                         }
                     }
                 });
-                [NSThread sleepForTimeInterval:0.2]; // каждые 0.2 сек достаточно
+                [NSThread sleepForTimeInterval:0.2];
             }
         });
     }];
