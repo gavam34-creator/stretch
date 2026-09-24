@@ -1,4 +1,4 @@
-name: Build Tweak
+name: Build Dylib
 
 on:
   push:
@@ -12,35 +12,22 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Theos (manual)
+      - name: Compile dylib with clang
         run: |
-          export THEOS=$HOME/theos
-          git clone --recursive https://github.com/theos/theos.git $THEOS
-          echo "THEOS=$THEOS" >> $GITHUB_ENV
-          echo "$THEOS/bin" >> $GITHUB_PATH
+          xcrun --sdk iphoneos clang -arch arm64 \
+            -dynamiclib \
+            -framework UIKit \
+            -framework Foundation \
+            -install_name @executable_path/Frameworks/Stretch.dylib \
+            -o Stretch.dylib Tweak.m
 
-      - name: Download iOS SDK
+      - name: Verify dylib
         run: |
-          mkdir -p $THEOS/sdks
-          cd $THEOS/sdks
-          wget -q https://github.com/theos/sdks/archive/refs/heads/master.zip -O master.zip
-          unzip -q master.zip
-          mv sdks-master/* ./
-          rm -rf sdks-master master.zip
-          echo "SDKs installed:"
-          ls -la $THEOS/sdks
-
-      - name: Verify Xcode clang
-        run: |
-          which clang
-          clang --version
-          xcrun --sdk iphoneos --show-sdk-path
-
-      - name: Build
-        run: make package
+          ls -la Stretch.dylib
+          file Stretch.dylib
 
       - name: Upload dylib
         uses: actions/upload-artifact@v4
         with:
           name: Stretch-dylib
-          path: .theos/obj/debug/*.dylib
+          path: Stretch.dylib
