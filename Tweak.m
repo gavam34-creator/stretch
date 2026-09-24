@@ -1,7 +1,6 @@
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 
-// Глобальная переменная аспекта (по умолчанию 16:10 = 1.6)
 static CGFloat targetAspect = 16.0 / 10.0;
 
 // --- Хук UIScreen.bounds ---
@@ -17,13 +16,57 @@ static CGFloat targetAspect = 16.0 / 10.0;
 }
 @end
 
+// --- Хук CAMetalLayer.contentsGravity ---
+@interface CAMetalLayer (Stretch)
+@end
+@implementation CAMetalLayer (Stretch)
+- (void)stretch_setContentsGravity:(NSString *)gravity {
+    // Всегда ставим "resize" — растянуть без сохранения пропорций
+    [self stretch_setContentsGravity:@"resize"];
+}
+- (void)stretch_setBounds:(CGRect)bounds {
+    // Растягиваем слой на весь экран
+    UIScreen *screen = [UIScreen mainScreen];
+    if (screen) {
+        CGRect full = [screen nativeBounds];
+        if (full.size.width > 0 && full.size.height > 0) {
+            [self stretch_setBounds:CGRectMake(0, 0, full.size.width, full.size.height)];
+            return;
+        }
+    }
+    [self stretch_setBounds:bounds];
+}
+- (void)stretch_setFrame:(CGRect)frame {
+    UIScreen *screen = [UIScreen mainScreen];
+    if (screen) {
+        CGRect full = [screen nativeBounds];
+        if (full.size.width > 0 && full.size.height > 0) {
+            [self stretch_setFrame:CGRectMake(0, 0, full.size.width, full.size.height)];
+            return;
+        }
+    }
+    [self stretch_setFrame:frame];
+}
+@end
+
+// --- Форсим перерисовку ---
+static void forceLayout(void) {
+    UIApplication *app = [UIApplication sharedApplication];
+    if (!app) return;
+    for (UIScene *scene in app.connectedScenes) {
+        if (![scene isKindOfClass:[UIWindowScene class]]) continue;
+        UIWindowScene *ws = (UIWindowScene *)scene;
+        for (UIWindow *window in ws.windows) {
+            [window setNeedsLayout];
+            [window layoutIfNeeded];
+        }
+    }
+}
+
 // --- Меню ---
 @interface BPMenuView : UIView
 @property (nonatomic, strong) UISlider *aspectSlider;
 @property (nonatomic, strong) UILabel *aspectLabel;
-@property (nonatomic, strong) UILabel *titleLabel;
-@property (nonatomic, strong) UIButton *closeButton;
-@property (nonatomic, assign) CGPoint lastPanPoint;
 @end
 
 @implementation BPMenuView
@@ -35,21 +78,14 @@ static CGFloat targetAspect = 16.0 / 10.0;
         self.layer.cornerRadius = 16.0;
         self.layer.borderWidth = 1.5;
         self.layer.borderColor = [UIColor colorWithRed:0.3 green:0.9 blue:0.4 alpha:1.0].CGColor;
-        self.layer.shadowColor = [UIColor blackColor].CGColor;
-        self.layer.shadowOpacity = 0.7;
-        self.layer.shadowRadius = 12.0;
-        self.layer.shadowOffset = CGSizeMake(0, 4);
 
-        // Заголовок
         UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(0, 10, frame.size.width, 30)];
         title.text = @"BYPASS MENU";
         title.textColor = [UIColor colorWithRed:0.3 green:0.9 blue:0.4 alpha:1.0];
         title.font = [UIFont fontWithName:@"Helvetica-Bold" size:18];
         title.textAlignment = NSTextAlignmentCenter;
         [self addSubview:title];
-        self.titleLabel = title;
 
-        // Кнопка закрытия
         UIButton *close = [UIButton buttonWithType:UIButtonTypeSystem];
         close.frame = CGRectMake(frame.size.width - 40, 8, 32, 32);
         [close setTitle:@"✕" forState:UIControlStateNormal];
@@ -57,9 +93,7 @@ static CGFloat targetAspect = 16.0 / 10.0;
         close.titleLabel.font = [UIFont boldSystemFontOfSize:20];
         [close addTarget:self action:@selector(closeMenu) forControlEvents:UIControlEventTouchUpInside];
         [self addSubview:close];
-        self.closeButton = close;
 
-        // Лейбл аспекта
         UILabel *label = [[UILabel alloc] initWithFrame:CGRectMake(15, 55, frame.size.width - 30, 25)];
         label.text = [NSString stringWithFormat:@"Aspect: %.2f", targetAspect];
         label.textColor = [UIColor whiteColor];
@@ -67,18 +101,15 @@ static CGFloat targetAspect = 16.0 / 10.0;
         [self addSubview:label];
         self.aspectLabel = label;
 
-        // Слайдер
         UISlider *slider = [[UISlider alloc] initWithFrame:CGRectMake(15, 90, frame.size.width - 30, 30)];
         slider.minimumValue = 1.0;
         slider.maximumValue = 2.0;
         slider.value = targetAspect;
         slider.minimumTrackTintColor = [UIColor colorWithRed:0.3 green:0.9 blue:0.4 alpha:1.0];
-        slider.maximumTrackTintColor = [UIColor colorWithWhite:0.3 alpha:1.0];
         [slider addTarget:self action:@selector(aspectChanged:) forControlEvents:UIControlEventValueChanged];
         [self addSubview:slider];
         self.aspectSlider = slider;
 
-        // Кнопки пресетов
         NSArray *presets = @[@"1.33", @"1.6", @"1.78", @"2.0"];
         for (int i = 0; i < presets.count; i++) {
             UIButton *btn = [UIButton buttonWithType:UIButtonTypeSystem];
@@ -93,7 +124,6 @@ static CGFloat targetAspect = 16.0 / 10.0;
             [self addSubview:btn];
         }
 
-        // Pan для перетаскивания
         UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePan:)];
         [self addGestureRecognizer:pan];
     }
@@ -103,6 +133,7 @@ static CGFloat targetAspect = 16.0 / 10.0;
 - (void)aspectChanged:(UISlider *)slider {
     targetAspect = slider.value;
     self.aspectLabel.text = [NSString stringWithFormat:@"Aspect: %.2f", targetAspect];
+    forceLayout();
 }
 
 - (void)presetTapped:(UIButton *)sender {
@@ -110,21 +141,19 @@ static CGFloat targetAspect = 16.0 / 10.0;
     targetAspect = [values[sender.tag] floatValue];
     self.aspectSlider.value = targetAspect;
     self.aspectLabel.text = [NSString stringWithFormat:@"Aspect: %.2f", targetAspect];
+    forceLayout();
 }
 
-- (void)closeMenu {
-    [self removeFromSuperview];
-}
+- (void)closeMenu { [self removeFromSuperview]; }
 
 - (void)handlePan:(UIPanGestureRecognizer *)pan {
     CGPoint translation = [pan translationInView:self.superview];
     self.center = CGPointMake(self.center.x + translation.x, self.center.y + translation.y);
     [pan setTranslation:CGPointZero inView:self.superview];
 }
-
 @end
 
-// --- Менеджер меню ---
+// --- Менеджер ---
 @interface BPMenuManager : NSObject
 @property (nonatomic, strong) BPMenuView *menuView;
 + (instancetype)shared;
@@ -133,42 +162,31 @@ static CGFloat targetAspect = 16.0 / 10.0;
 @end
 
 @implementation BPMenuManager
-
 + (instancetype)shared {
     static BPMenuManager *instance = nil;
     static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        instance = [[BPMenuManager alloc] init];
-    });
+    dispatch_once(&onceToken, ^{ instance = [[BPMenuManager alloc] init]; });
     return instance;
 }
 
 - (void)setupGesture {
     dispatch_async(dispatch_get_main_queue(), ^{
-        UIWindow *window = nil;
         UIApplication *app = [UIApplication sharedApplication];
         for (UIScene *scene in app.connectedScenes) {
             if (![scene isKindOfClass:[UIWindowScene class]]) continue;
             UIWindowScene *ws = (UIWindowScene *)scene;
             for (UIWindow *w in ws.windows) {
-                if (w.isKeyWindow) { window = w; break; }
+                UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(handleTap:)];
+                tap.numberOfTapsRequired = 2;
+                tap.numberOfTouchesRequired = 3;
+                tap.cancelsTouchesInView = NO;
+                [w addGestureRecognizer:tap];
             }
-            if (window) break;
         }
-        if (!window) return;
-
-        // Двойной тап тремя пальцами
-        UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(handleTripleTap:)];
-        tap.numberOfTapsRequired = 2;
-        tap.numberOfTouchesRequired = 3;
-        tap.cancelsTouchesInView = NO;
-        [window addGestureRecognizer:tap];
     });
 }
 
-- (void)handleTripleTap:(UITapGestureRecognizer *)tap {
-    [self toggleMenu];
-}
+- (void)handleTap:(UITapGestureRecognizer *)tap { [self toggleMenu]; }
 
 - (void)toggleMenu {
     if (self.menuView && self.menuView.superview) {
@@ -176,32 +194,22 @@ static CGFloat targetAspect = 16.0 / 10.0;
         self.menuView = nil;
         return;
     }
-
     dispatch_async(dispatch_get_main_queue(), ^{
-        UIWindow *window = nil;
         UIApplication *app = [UIApplication sharedApplication];
+        UIWindow *window = nil;
         for (UIScene *scene in app.connectedScenes) {
             if (![scene isKindOfClass:[UIWindowScene class]]) continue;
             UIWindowScene *ws = (UIWindowScene *)scene;
-            for (UIWindow *w in ws.windows) {
-                if (w.isKeyWindow) { window = w; break; }
-            }
+            for (UIWindow *w in ws.windows) { if (w.isKeyWindow) { window = w; break; } }
             if (window) break;
         }
         if (!window) return;
-
-        CGRect screen = window.bounds;
         CGFloat menuW = 280;
-        CGFloat menuH = 180;
-        CGFloat x = (screen.size.width - menuW) / 2.0;
-        CGFloat y = 80;
-
-        BPMenuView *menu = [[BPMenuView alloc] initWithFrame:CGRectMake(x, y, menuW, menuH)];
+        BPMenuView *menu = [[BPMenuView alloc] initWithFrame:CGRectMake((window.bounds.size.width - menuW)/2.0, 80, menuW, 180)];
         [window addSubview:menu];
         self.menuView = menu;
     });
 }
-
 @end
 
 // --- Инициализация ---
@@ -212,14 +220,27 @@ static void init_hook(void) {
                                                        queue:[NSOperationQueue mainQueue]
                                                   usingBlock:^(NSNotification *note) {
         // Хук UIScreen.bounds
-        Class cls = objc_getClass("UIScreen");
-        if (cls) {
-            Method orig = class_getInstanceMethod(cls, @selector(bounds));
-            Method repl = class_getInstanceMethod(cls, @selector(stretch_bounds));
-            if (orig && repl) method_exchangeImplementations(orig, repl);
+        Class screenCls = objc_getClass("UIScreen");
+        if (screenCls) {
+            Method o1 = class_getInstanceMethod(screenCls, @selector(bounds));
+            Method r1 = class_getInstanceMethod(screenCls, @selector(stretch_bounds));
+            if (o1 && r1) method_exchangeImplementations(o1, r1);
         }
+        // Хук CAMetalLayer — содержимое гравити + размер
+        Class metalCls = objc_getClass("CAMetalLayer");
+        if (metalCls) {
+            Method o1 = class_getInstanceMethod(metalCls, @selector(setContentsGravity:));
+            Method r1 = class_getInstanceMethod(metalCls, @selector(stretch_setContentsGravity:));
+            if (o1 && r1) method_exchangeImplementations(o1, r1);
 
-        // Настройка жеста (с задержкой, чтобы окно точно было)
+            Method o2 = class_getInstanceMethod(metalCls, @selector(setBounds:));
+            Method r2 = class_getInstanceMethod(metalCls, @selector(stretch_setBounds:));
+            if (o2 && r2) method_exchangeImplementations(o2, r2);
+
+            Method o3 = class_getInstanceMethod(metalCls, @selector(setFrame:));
+            Method r3 = class_getInstanceMethod(metalCls, @selector(stretch_setFrame:));
+            if (o3 && r3) method_exchangeImplementations(o3, r3);
+        }
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             [[BPMenuManager shared] setupGesture];
         });
