@@ -7,17 +7,12 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: macos-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Dependencies
-        run: |
-          sudo apt update
-          sudo apt install -y git make clang perl fakeroot curl wget unzip xz-utils
-
-      - name: Install Theos
+      - name: Install Theos (manual)
         run: |
           export THEOS=$HOME/theos
           git clone --recursive https://github.com/theos/theos.git $THEOS
@@ -32,17 +27,14 @@ jobs:
           unzip -q master.zip
           mv sdks-master/* ./
           rm -rf sdks-master master.zip
+          echo "SDKs installed:"
+          ls -la $THEOS/sdks
 
-      - name: Download Toolchain from kirb
+      - name: Verify Xcode clang
         run: |
-          mkdir -p $THEOS/toolchain/linux/iphone
-          cd $THEOS/toolchain/linux/iphone
-          wget -q https://github.com/kirb/llvm-project/releases/download/v10.0.0-1/linux-ios-arm64e-clang-toolchain.tar.lzma -O toolchain.tar.lzma
-          tar -xf toolchain.tar.lzma
-          rm toolchain.tar.lzma
-          echo "Toolchain contents:"
-          ls -la
-          find . -name "clang" -type f
+          which clang
+          clang --version
+          xcrun --sdk iphoneos --show-sdk-path
 
       - name: Build
         run: make package
