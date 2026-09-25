@@ -2,9 +2,11 @@
 #import <objc/runtime.h>
 
 static CGFloat targetAspect = 16.0 / 10.0;
-static BOOL stretchEnabled = NO;
+static BOOL stretchEnabled = NO; // ВСЁ выключено до активации
 
-// --- UIScreen hooks ---
+// ============================================================
+// UIScreen — хукаем ВСЁ, что может использоваться для вьюпорта
+// ============================================================
 @interface UIScreen (Stretch)
 @end
 @implementation UIScreen (Stretch)
@@ -12,7 +14,7 @@ static BOOL stretchEnabled = NO;
 - (CGRect)stretch_bounds {
     CGRect real = [self stretch_bounds];
     if (!stretchEnabled) return real;
-    if (real.size.height <= 0) return real;
+    if (real.size.height <= 0 || real.size.width <= 0) return real;
     CGFloat h = real.size.height;
     CGFloat w = h * targetAspect;
     return CGRectMake(0, 0, w, h);
@@ -21,7 +23,7 @@ static BOOL stretchEnabled = NO;
 - (CGRect)stretch_nativeBounds {
     CGRect real = [self stretch_nativeBounds];
     if (!stretchEnabled) return real;
-    if (real.size.height <= 0) return real;
+    if (real.size.height <= 0 || real.size.width <= 0) return real;
     CGFloat h = real.size.height;
     CGFloat w = h * targetAspect;
     return CGRectMake(0, 0, w, h);
@@ -30,52 +32,58 @@ static BOOL stretchEnabled = NO;
 - (CGRect)stretch_applicationFrame {
     CGRect real = [self stretch_applicationFrame];
     if (!stretchEnabled) return real;
-    if (real.size.height <= 0) return real;
+    if (real.size.height <= 0 || real.size.width <= 0) return real;
     CGFloat h = real.size.height;
     CGFloat w = h * targetAspect;
     return CGRectMake(0, 0, w, h);
 }
 
-- (CGSize)stretch_currentModeSize {
-    CGSize real = [self stretch_currentModeSize];
+@end
+
+// ============================================================
+// UIWindow — хукаем bounds с флагом
+// ============================================================
+@interface UIWindow (Stretch)
+@end
+@implementation UIWindow (Stretch)
+- (CGRect)stretch_bounds {
+    CGRect real = [self stretch_bounds];
+    if (!stretchEnabled) return real;
+    if (real.size.height <= 0 || real.size.width <= 0) return real;
+    CGFloat h = real.size.height;
+    CGFloat w = h * targetAspect;
+    return CGRectMake(0, 0, w, h);
+}
+@end
+
+// ============================================================
+// CAMetalLayer — drawableSize с флагом
+// ============================================================
+@interface CAMetalLayer (Stretch)
+@end
+@implementation CAMetalLayer (Stretch)
+- (CGSize)stretch_drawableSize {
+    CGSize real = [self stretch_drawableSize];
     if (!stretchEnabled) return real;
     if (real.height <= 0) return real;
     CGFloat h = real.height;
     CGFloat w = h * targetAspect;
     return CGSizeMake(w, h);
 }
-
-- (CGFloat)stretch_scale {
-    CGFloat real = [self stretch_scale];
-    return real; // scale не трогаем — иначе всё развалится
+- (void)stretch_setDrawableSize:(CGSize)size {
+    if (stretchEnabled && size.height > 0) {
+        CGFloat h = size.height;
+        CGFloat w = h * targetAspect;
+        [self stretch_setDrawableSize:CGSizeMake(w, h)];
+        return;
+    }
+    [self stretch_setDrawableSize:size];
 }
-
 @end
 
-// --- UIWindow hooks ---
-@interface UIWindow (Stretch)
-@end
-@implementation UIWindow (Stretch)
-
-- (CGRect)stretch_bounds {
-    CGRect real = [self stretch_bounds];
-    if (!stretchEnabled) return real;
-    if (real.size.height <= 0) return real;
-    CGFloat h = real.size.height;
-    CGFloat w = h * targetAspect;
-    return CGRectMake(0, 0, w, h);
-}
-
-- (CGRect)stretch_frame {
-    CGRect real = [self stretch_frame];
-    if (!stretchEnabled) return real;
-    // Frame НЕ меняем — он определяет положение окна
-    return real;
-}
-
-@end
-
-// --- Форсируем перерисовку ---
+// ============================================================
+// Форсим перерисовку
+// ============================================================
 static void forceLayout(void) {
     UIApplication *app = [UIApplication sharedApplication];
     if (!app) return;
@@ -85,30 +93,13 @@ static void forceLayout(void) {
         for (UIWindow *window in ws.windows) {
             [window setNeedsLayout];
             [window layoutIfNeeded];
-            for (UIView *sub in window.subviews) {
-                [sub setNeedsLayout];
-                [sub layoutIfNeeded];
-                for (UIView *sub2 in sub.subviews) {
-                    [sub2 setNeedsLayout];
-                    [sub2 layoutIfNeeded];
-                }
-            }
         }
     }
 }
 
-// --- Форсируем rotation (чтобы UE4 пересчитал вьюпорт) ---
-static void forceRotation(void) {
-    // Постим уведомление — UE4 может пересчитать вьюпорт
-    [[NSNotificationCenter defaultCenter] postNotificationName:UIDeviceOrientationDidChangeNotification
-                                                        object:nil];
-    [[NSNotificationCenter defaultCenter] postNotificationName:UIApplicationDidChangeStatusBarOrientationNotification
-                                                        object:nil];
-    [[NSNotificationCenter defaultCenter] postNotificationName:UIApplicationWillChangeStatusBarOrientationNotification
-                                                        object:nil];
-}
-
-// --- Меню ---
+// ============================================================
+// Меню
+// ============================================================
 @interface BPMenuView : UIView
 @property (nonatomic, strong) UILabel *aspectLabel;
 @property (nonatomic, strong) UISlider *aspectSlider;
@@ -180,7 +171,6 @@ static void forceRotation(void) {
     targetAspect = slider.value;
     self.aspectLabel.text = [NSString stringWithFormat:@"Aspect: %.2f", targetAspect];
     forceLayout();
-    forceRotation();
 }
 
 - (void)presetTapped:(UIButton *)sender {
@@ -190,7 +180,6 @@ static void forceRotation(void) {
     self.aspectSlider.value = targetAspect;
     self.aspectLabel.text = [NSString stringWithFormat:@"Aspect: %.2f", targetAspect];
     forceLayout();
-    forceRotation();
 }
 
 - (void)closeMenu { [self removeFromSuperview]; }
@@ -202,7 +191,9 @@ static void forceRotation(void) {
 }
 @end
 
-// --- Менеджер ---
+// ============================================================
+// Менеджер
+// ============================================================
 @interface BPMenuManager : NSObject
 @property (nonatomic, strong) BPMenuView *menuView;
 + (instancetype)shared;
@@ -256,28 +247,31 @@ static void forceRotation(void) {
 - (void)delayedSetup { [self setupGesture]; }
 @end
 
-// --- Инициализация ---
+// ============================================================
+// Инициализация — хуки ставим СРАЗУ, но флаг OFF
+// ============================================================
 __attribute__((constructor))
 static void init_hook(void) {
-    Class cls = objc_getClass("UIScreen");
-    if (cls) {
+    // UIScreen.bounds
+    Class screenCls = objc_getClass("UIScreen");
+    if (screenCls) {
         Method o, r;
-        o = class_getInstanceMethod(cls, @selector(bounds));
-        r = class_getInstanceMethod(cls, @selector(stretch_bounds));
+        o = class_getInstanceMethod(screenCls, @selector(bounds));
+        r = class_getInstanceMethod(screenCls, @selector(stretch_bounds));
         if (o && r) method_exchangeImplementations(o, r);
 
-        o = class_getInstanceMethod(cls, @selector(nativeBounds));
-        r = class_getInstanceMethod(cls, @selector(stretch_nativeBounds));
+        o = class_getInstanceMethod(screenCls, @selector(nativeBounds));
+        r = class_getInstanceMethod(screenCls, @selector(stretch_nativeBounds));
         if (o && r) method_exchangeImplementations(o, r);
 
-        // applicationFrame — может не быть на новых iOS
-        if (class_getInstanceMethod(cls, @selector(applicationFrame))) {
-            o = class_getInstanceMethod(cls, @selector(applicationFrame));
-            r = class_getInstanceMethod(cls, @selector(stretch_applicationFrame));
+        if (class_getInstanceMethod(screenCls, @selector(applicationFrame))) {
+            o = class_getInstanceMethod(screenCls, @selector(applicationFrame));
+            r = class_getInstanceMethod(screenCls, @selector(stretch_applicationFrame));
             if (o && r) method_exchangeImplementations(o, r);
         }
     }
 
+    // UIWindow.bounds
     Class winCls = objc_getClass("UIWindow");
     if (winCls) {
         Method o = class_getInstanceMethod(winCls, @selector(bounds));
@@ -285,5 +279,18 @@ static void init_hook(void) {
         if (o && r) method_exchangeImplementations(o, r);
     }
 
+    // CAMetalLayer.drawableSize
+    Class metalCls = objc_getClass("CAMetalLayer");
+    if (metalCls) {
+        Method o = class_getInstanceMethod(metalCls, @selector(drawableSize));
+        Method r = class_getInstanceMethod(metalCls, @selector(stretch_drawableSize));
+        if (o && r) method_exchangeImplementations(o, r);
+
+        Method o2 = class_getInstanceMethod(metalCls, @selector(setDrawableSize:));
+        Method r2 = class_getInstanceMethod(metalCls, @selector(stretch_setDrawableSize:));
+        if (o2 && r2) method_exchangeImplementations(o2, r2);
+    }
+
+    // Жест — только через 5 секунд
     [[BPMenuManager shared] performSelector:@selector(delayedSetup) withObject:nil afterDelay:5.0];
 }
