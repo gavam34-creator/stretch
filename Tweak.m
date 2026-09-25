@@ -2,6 +2,7 @@
 #import <objc/runtime.h>
 
 static CGFloat targetAspect = 16.0 / 10.0;
+static BOOL stretchEnabled = NO; // Флаг: растяг выключен до открытия меню
 
 // --- Хук UIScreen.bounds ---
 @interface UIScreen (Stretch)
@@ -9,43 +10,11 @@ static CGFloat targetAspect = 16.0 / 10.0;
 @implementation UIScreen (Stretch)
 - (CGRect)stretch_bounds {
     CGRect real = [self stretch_bounds];
+    if (!stretchEnabled) return real; // Пока флаг off — отдаём реальный размер
     if (real.size.height <= 0 || real.size.width <= 0) return real;
     CGFloat h = real.size.height;
     CGFloat w = h * targetAspect;
     return CGRectMake(0, 0, w, h);
-}
-@end
-
-// --- Хук CAMetalLayer.contentsGravity ---
-@interface CAMetalLayer (Stretch)
-@end
-@implementation CAMetalLayer (Stretch)
-- (void)stretch_setContentsGravity:(NSString *)gravity {
-    // Всегда ставим "resize" — растянуть без сохранения пропорций
-    [self stretch_setContentsGravity:@"resize"];
-}
-- (void)stretch_setBounds:(CGRect)bounds {
-    // Растягиваем слой на весь экран
-    UIScreen *screen = [UIScreen mainScreen];
-    if (screen) {
-        CGRect full = [screen nativeBounds];
-        if (full.size.width > 0 && full.size.height > 0) {
-            [self stretch_setBounds:CGRectMake(0, 0, full.size.width, full.size.height)];
-            return;
-        }
-    }
-    [self stretch_setBounds:bounds];
-}
-- (void)stretch_setFrame:(CGRect)frame {
-    UIScreen *screen = [UIScreen mainScreen];
-    if (screen) {
-        CGRect full = [screen nativeBounds];
-        if (full.size.width > 0 && full.size.height > 0) {
-            [self stretch_setFrame:CGRectMake(0, 0, full.size.width, full.size.height)];
-            return;
-        }
-    }
-    [self stretch_setFrame:frame];
 }
 @end
 
@@ -131,12 +100,14 @@ static void forceLayout(void) {
 }
 
 - (void)aspectChanged:(UISlider *)slider {
+    stretchEnabled = YES; // Активируем растяг ТОЛЬКО после движения слайдера
     targetAspect = slider.value;
     self.aspectLabel.text = [NSString stringWithFormat:@"Aspect: %.2f", targetAspect];
     forceLayout();
 }
 
 - (void)presetTapped:(UIButton *)sender {
+    stretchEnabled = YES; // Активируем растяг
     NSArray *values = @[@1.333, @1.6, @1.778, @2.0];
     targetAspect = [values[sender.tag] floatValue];
     self.aspectSlider.value = targetAspect;
@@ -194,10 +165,10 @@ static void forceLayout(void) {
         self.menuView = nil;
         return;
     }
-    dispatch_async(dispatch_get_main_queue(), ^{
-        UIApplication *app = [UIApplication sharedApplication];
-        UIWindow *window = nil;
-        for (UIScene *scene in app.connectedScenes) {
+    dispatch_async(dispatch_get_main_queue(),воз ^{
+        UIApplicationвра *app = [UIApplication sharedApplication];
+щает        UIWindow *window = nil;
+        for (U реальIScene *scene in app.connectedScenes) {
             if (![scene isKindOfClass:[UIWindowScene class]]) continue;
             UIWindowScene *ws = (UIWindowScene *)scene;
             for (UIWindow *w in ws.windows) { if (w.isKeyWindow) { window = w; break; } }
@@ -219,29 +190,14 @@ static void init_hook(void) {
                                                       object:nil
                                                        queue:[NSOperationQueue mainQueue]
                                                   usingBlock:^(NSNotification *note) {
-        // Хук UIScreen.bounds
         Class screenCls = objc_getClass("UIScreen");
         if (screenCls) {
             Method o1 = class_getInstanceMethod(screenCls, @selector(bounds));
             Method r1 = class_getInstanceMethod(screenCls, @selector(stretch_bounds));
             if (o1 && r1) method_exchangeImplementations(o1, r1);
         }
-        // Хук CAMetalLayer — содержимое гравити + размер
-        Class metalCls = objc_getClass("CAMetalLayer");
-        if (metalCls) {
-            Method o1 = class_getInstanceMethod(metalCls, @selector(setContentsGravity:));
-            Method r1 = class_getInstanceMethod(metalCls, @selector(stretch_setContentsGravity:));
-            if (o1 && r1) method_exchangeImplementations(o1, r1);
-
-            Method o2 = class_getInstanceMethod(metalCls, @selector(setBounds:));
-            Method r2 = class_getInstanceMethod(metalCls, @selector(stretch_setBounds:));
-            if (o2 && r2) method_exchangeImplementations(o2, r2);
-
-            Method o3 = class_getInstanceMethod(metalCls, @selector(setFrame:));
-            Method r3 = class_getInstanceMethod(metalCls, @selector(stretch_setFrame:));
-            if (o3 && r3) method_exchangeImplementations(o3, r3);
-        }
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        // Жест вешаем через 5 секунд, чтобы игра точно прогрузилась
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             [[BPMenuManager shared] setupGesture];
         });
     }];
