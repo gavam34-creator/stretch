@@ -2,7 +2,7 @@
 #import <objc/runtime.h>
 
 static CGFloat targetAspect = 16.0 / 10.0;
-static BOOL stretchEnabled = NO; // Флаг: растяг выключен до открытия меню
+static BOOL stretchEnabled = NO; // Растяг выключен по умолчанию — чтобы игра запускалась чисто
 
 // --- Хук UIScreen.bounds ---
 @interface UIScreen (Stretch)
@@ -10,7 +10,7 @@ static BOOL stretchEnabled = NO; // Флаг: растяг выключен до
 @implementation UIScreen (Stretch)
 - (CGRect)stretch_bounds {
     CGRect real = [self stretch_bounds];
-    if (!stretchEnabled) return real; // Пока флаг off — отдаём реальный размер
+    if (!stretchEnabled) return real; // Пока off — отдаём реальный размер
     if (real.size.height <= 0 || real.size.width <= 0) return real;
     CGFloat h = real.size.height;
     CGFloat w = h * targetAspect;
@@ -34,8 +34,8 @@ static void forceLayout(void) {
 
 // --- Меню ---
 @interface BPMenuView : UIView
-@property (nonatomic, strong) UISlider *aspectSlider;
 @property (nonatomic, strong) UILabel *aspectLabel;
+@property (nonatomic, strong) UISlider *aspectSlider;
 @end
 
 @implementation BPMenuView
@@ -57,7 +57,7 @@ static void forceLayout(void) {
 
         UIButton *close = [UIButton buttonWithType:UIButtonTypeSystem];
         close.frame = CGRectMake(frame.size.width - 40, 8, 32, 32);
-        [close setTitle:@"✕" forState:UIControlStateNormal];
+        [close setTitle:@"X" forState:UIControlStateNormal];
         [close setTitleColor:[UIColor colorWithRed:1.0 green:0.3 blue:0.3 alpha:1.0] forState:UIControlStateNormal];
         close.titleLabel.font = [UIFont boldSystemFontOfSize:20];
         [close addTarget:self action:@selector(closeMenu) forControlEvents:UIControlEventTouchUpInside];
@@ -80,7 +80,7 @@ static void forceLayout(void) {
         self.aspectSlider = slider;
 
         NSArray *presets = @[@"1.33", @"1.6", @"1.78", @"2.0"];
-        for (int i = 0; i < presets.count; i++) {
+        for (int i = 0; i < 4; i++) {
             UIButton *btn = [UIButton buttonWithType:UIButtonTypeSystem];
             CGFloat btnW = (frame.size.width - 50) / 4.0;
             btn.frame = CGRectMake(15 + i * (btnW + 5), 130, btnW, 32);
@@ -100,14 +100,14 @@ static void forceLayout(void) {
 }
 
 - (void)aspectChanged:(UISlider *)slider {
-    stretchEnabled = YES; // Активируем растяг ТОЛЬКО после движения слайдера
+    stretchEnabled = YES;
     targetAspect = slider.value;
     self.aspectLabel.text = [NSString stringWithFormat:@"Aspect: %.2f", targetAspect];
     forceLayout();
 }
 
 - (void)presetTapped:(UIButton *)sender {
-    stretchEnabled = YES; // Активируем растяг
+    stretchEnabled = YES;
     NSArray *values = @[@1.333, @1.6, @1.778, @2.0];
     targetAspect = [values[sender.tag] floatValue];
     self.aspectSlider.value = targetAspect;
@@ -130,34 +130,45 @@ static void forceLayout(void) {
 + (instancetype)shared;
 - (void)toggleMenu;
 - (void)setupGesture;
+- (void)delayedSetup;
 @end
 
 @implementation BPMenuManager
+
 + (instancetype)shared {
     static BPMenuManager *instance = nil;
     static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{ instance = [[BPMenuManager alloc] init]; });
+    dispatch_once(&onceToken, ^{
+        instance = [[BPMenuManager alloc] init];
+    });
     return instance;
 }
 
-- (void)setupGesture {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        UIApplication *app = [UIApplication sharedApplication];
-        for (UIScene *scene in app.connectedScenes) {
-            if (![scene isKindOfClass:[UIWindowScene class]]) continue;
-            UIWindowScene *ws = (UIWindowScene *)scene;
-            for (UIWindow *w in ws.windows) {
-                UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(handleTap:)];
-                tap.numberOfTapsRequired = 2;
-                tap.numberOfTouchesRequired = 3;
-                tap.cancelsTouchesInView = NO;
-                [w addGestureRecognizer:tap];
-            }
+- (UIWindow *)getKeyWindow {
+    UIApplication *app = [UIApplication sharedApplication];
+    for (UIScene *scene in app.connectedScenes) {
+        if (![scene isKindOfClass:[UIWindowScene class]]) continue;
+        UIWindowScene *ws = (UIWindowScene *)scene;
+        for (UIWindow *w in ws.windows) {
+            if (w.isKeyWindow) return w;
         }
-    });
+    }
+    return nil;
 }
 
-- (void)handleTap:(UITapGestureRecognizer *)tap { [self toggleMenu]; }
+- (void)setupGesture {
+    UIWindow *window = [self getKeyWindow];
+    if (!window) return;
+    UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(handleTap:)];
+    tap.numberOfTapsRequired = 2;
+    tap.numberOfTouchesRequired = 3;
+    tap.cancelsTouchesInView = NO;
+    [window addGestureRecognizer:tap];
+}
+
+- (void)handleTap:(UITapGestureRecognizer *)tap {
+    [self toggleMenu];
+}
 
 - (void)toggleMenu {
     if (self.menuView && self.menuView.superview) {
@@ -165,40 +176,31 @@ static void forceLayout(void) {
         self.menuView = nil;
         return;
     }
-    dispatch_async(dispatch_get_main_queue(),воз ^{
-        UIApplicationвра *app = [UIApplication sharedApplication];
-щает        UIWindow *window = nil;
-        for (U реальIScene *scene in app.connectedScenes) {
-            if (![scene isKindOfClass:[UIWindowScene class]]) continue;
-            UIWindowScene *ws = (UIWindowScene *)scene;
-            for (UIWindow *w in ws.windows) { if (w.isKeyWindow) { window = w; break; } }
-            if (window) break;
-        }
-        if (!window) return;
-        CGFloat menuW = 280;
-        BPMenuView *menu = [[BPMenuView alloc] initWithFrame:CGRectMake((window.bounds.size.width - menuW)/2.0, 80, menuW, 180)];
-        [window addSubview:menu];
-        self.menuView = menu;
-    });
+    UIWindow *window = [self getKeyWindow];
+    if (!window) return;
+    CGFloat menuW = 280;
+    BPMenuView *menu = [[BPMenuView alloc] initWithFrame:CGRectMake((window.bounds.size.width - menuW)/2.0, 80, menuW, 180)];
+    [window addSubview:menu];
+    self.menuView = menu;
 }
+
+- (void)delayedSetup {
+    [self setupGesture];
+}
+
 @end
 
 // --- Инициализация ---
 __attribute__((constructor))
 static void init_hook(void) {
-    [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidBecomeActiveNotification
-                                                      object:nil
-                                                       queue:[NSOperationQueue mainQueue]
-                                                  usingBlock:^(NSNotification *note) {
-        Class screenCls = objc_getClass("UIScreen");
-        if (screenCls) {
-            Method o1 = class_getInstanceMethod(screenCls, @selector(bounds));
-            Method r1 = class_getInstanceMethod(screenCls, @selector(stretch_bounds));
-            if (o1 && r1) method_exchangeImplementations(o1, r1);
+    Class screenCls = objc_getClass("UIScreen");
+    if (screenCls) {
+        Method o1 = class_getInstanceMethod(screenCls, @selector(bounds));
+        Method r1 = class_getInstanceMethod(screenCls, @selector(stretch_bounds));
+        if (o1 && r1) {
+            method_exchangeImplementations(o1, r1);
         }
-        // Жест вешаем через 5 секунд, чтобы игра точно прогрузилась
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            [[BPMenuManager shared] setupGesture];
-        });
-    }];
+    }
+    // Ждём 5 секунд, потом вешаем жест — чтобы игра прогрузилась
+    [[BPMenuManager shared] performSelector:@selector(delayedSetup) withObject:nil afterDelay:5.0];
 }
