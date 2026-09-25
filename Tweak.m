@@ -1,8 +1,9 @@
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
+#import <QuartzCore/CAMetalLayer.h>
 
 static CGFloat targetAspect = 16.0 / 10.0;
-static BOOL stretchEnabled = NO; // Растяг выключен по умолчанию — чтобы игра запускалась чисто
+static BOOL stretchEnabled = NO;
 
 // --- Хук UIScreen.bounds ---
 @interface UIScreen (Stretch)
@@ -10,11 +11,35 @@ static BOOL stretchEnabled = NO; // Растяг выключен по умол�
 @implementation UIScreen (Stretch)
 - (CGRect)stretch_bounds {
     CGRect real = [self stretch_bounds];
-    if (!stretchEnabled) return real; // Пока off — отдаём реальный размер
+    if (!stretchEnabled) return real;
     if (real.size.height <= 0 || real.size.width <= 0) return real;
     CGFloat h = real.size.height;
     CGFloat w = h * targetAspect;
     return CGRectMake(0, 0, w, h);
+}
+@end
+
+// --- Хук CAMetalLayer.drawableSize ---
+@interface CAMetalLayer (Stretch)
+@end
+@implementation CAMetalLayer (Stretch)
+- (CGSize)stretch_drawableSize {
+    CGSize real = [self stretch_drawableSize];
+    if (!stretchEnabled) return real;
+    if (real.height <= 0) return real;
+    // Рендер-таргет 4:3 — игра рендерит картинку в этом аспекте
+    CGFloat h = real.height;
+    CGFloat w = h * targetAspect;
+    return CGSizeMake(w, h);
+}
+- (void)stretch_setDrawableSize:(CGSize)size {
+    if (stretchEnabled && size.height > 0) {
+        CGFloat h = size.height;
+        CGFloat w = h * targetAspect;
+        [self stretch_setDrawableSize:CGSizeMake(w, h)];
+        return;
+    }
+    [self stretch_setDrawableSize:size];
 }
 @end
 
@@ -128,19 +153,14 @@ static void forceLayout(void) {
 @interface BPMenuManager : NSObject
 @property (nonatomic, strong) BPMenuView *menuView;
 + (instancetype)shared;
-- (void)toggleMenu;
-- (void)setupGesture;
 - (void)delayedSetup;
 @end
 
 @implementation BPMenuManager
-
 + (instancetype)shared {
     static BPMenuManager *instance = nil;
     static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        instance = [[BPMenuManager alloc] init];
-    });
+    dispatch_once(&onceToken, ^{ instance = [[BPMenuManager alloc] init]; });
     return instance;
 }
 
@@ -149,9 +169,7 @@ static void forceLayout(void) {
     for (UIScene *scene in app.connectedScenes) {
         if (![scene isKindOfClass:[UIWindowScene class]]) continue;
         UIWindowScene *ws = (UIWindowScene *)scene;
-        for (UIWindow *w in ws.windows) {
-            if (w.isKeyWindow) return w;
-        }
+        for (UIWindow *w in ws.windows) { if (w.isKeyWindow) return w; }
     }
     return nil;
 }
@@ -166,9 +184,7 @@ static void forceLayout(void) {
     [window addGestureRecognizer:tap];
 }
 
-- (void)handleTap:(UITapGestureRecognizer *)tap {
-    [self toggleMenu];
-}
+- (void)handleTap:(UITapGestureRecognizer *)tap { [self toggleMenu]; }
 
 - (void)toggleMenu {
     if (self.menuView && self.menuView.superview) {
@@ -184,23 +200,29 @@ static void forceLayout(void) {
     self.menuView = menu;
 }
 
-- (void)delayedSetup {
-    [self setupGesture];
-}
-
+- (void)delayedSetup { [self setupGesture]; }
 @end
 
 // --- Инициализация ---
 __attribute__((constructor))
 static void init_hook(void) {
+    // UIScreen.bounds
     Class screenCls = objc_getClass("UIScreen");
     if (screenCls) {
         Method o1 = class_getInstanceMethod(screenCls, @selector(bounds));
         Method r1 = class_getInstanceMethod(screenCls, @selector(stretch_bounds));
-        if (o1 && r1) {
-            method_exchangeImplementations(o1, r1);
-        }
+        if (o1 && r1) method_exchangeImplementations(o1, r1);
     }
-    // Ждём 5 секунд, потом вешаем жест — чтобы игра прогрузилась
+    // CAMetalLayer.drawableSize
+    Class metalCls = objc_getClass("CAMetalLayer");
+    if (metalCls) {
+        Method o2 = class_getInstanceMethod(metalCls, @selector(drawableSize));
+        Method r2 = class_getInstanceMethod(metalCls, @selector(stretch_drawableSize));
+        if (o2 && r2) method_exchangeImplementations(o2, r2);
+
+        Method o3 = class_getInstanceMethod(metalCls, @selector(setDrawableSize:));
+        Method r3 = class_getInstanceMethod(metalCls, @selector(stretch_setDrawableSize:));
+        if (o3 && r3) method_exchangeImplementations(o3, r3);
+    }
     [[BPMenuManager shared] performSelector:@selector(delayedSetup) withObject:nil afterDelay:5.0];
 }
