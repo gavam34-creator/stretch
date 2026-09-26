@@ -7,9 +7,22 @@
 //  Широкие aspect (>= 19.5:9) убирают чёрные полосы. Меняется на лету.
 // =============================================================================
 
-// Текущий aspect. По умолчанию ШИРОКИЙ (20:9) — держит высоту, расширяет
-// бока -> без чёрных полос. Узкие (4:3/16:9) дадут полосы по бокам.
-static double g_aspect = 20.0 / 9.0;   // 2.222 — шире нативных 19.5:9, без полос
+// Текущий aspect. По умолчанию 1440x1080 = 4:3 (1.333) — «ПК-вид».
+static double g_aspect = 1440.0 / 1080.0;   // 4:3
+
+// Игра кэширует размер экрана. Чтобы смена aspect применилась — шлём
+// уведомление об ориентации, чтобы движок перечитал bounds и перестроил вьюпорт.
+static void forceRereadBounds(void) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        Class cls = [UIScreen mainScreen].class;
+        SEL will = NSSelectorFromString(@"setNeedsLayout");
+        if ([cls respondsToSelector:will]) [cls performSelector:will];
+        [[NSNotificationCenter defaultCenter]
+            postNotificationName:UIDeviceOrientationDidChangeNotification object:nil];
+        [[NSNotificationCenter defaultCenter]
+            postNotificationName:UIDeviceOrientationWillChangeNotification object:nil];
+    });
+}
 
 static CGRect (*orig_bounds)(id, SEL) = NULL;
 static CGRect (*orig_nativeBounds)(id, SEL) = NULL;
@@ -65,9 +78,7 @@ static UISlider *g_slider = nil;
     UISlider *s = (UISlider *)sender;
     g_aspect = s.value;
     [self updateLabel];
-    // мягко обновляем без пересоздания окна
-    [self hide];
-    [self show];
+    forceRereadBounds();   // заставить игру перечитать bounds
 }
 
 + (UIButton *)mkBtn:(NSString *)t aspect:(double)a {
@@ -163,6 +174,7 @@ static UISlider *g_slider = nil;
     UIButton *b = (UIButton *)sender;
     g_aspect = b.accessibilityIdentifier.doubleValue;
     [self hide];
+    forceRereadBounds();   // применить
 }
 
 + (void)toggleMenu:(id)sender { [self show]; }
