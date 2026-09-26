@@ -2,6 +2,7 @@
 #import <QuartzCore/QuartzCore.h>
 #import <objc/runtime.h>
 #import <stdio.h>
+#include <math.h>
 
 // =============================================================================
 //  WORKUP STRETCH — 4:3 на весь экран, БЕЗ чёрных полос.  arm64e, PUBG VNG 4.6
@@ -24,9 +25,6 @@ static volatile int g_spoofOn = 0;          // вкл. через 7 сек
 
 static CGRect (*orig_bounds)(id, SEL)       = NULL;
 static CGRect (*orig_nativeBounds)(id, SEL) = NULL;
-static void (*orig_setFrame)(id, SEL, CGRect)      = NULL;
-static void (*orig_setBounds)(id, SEL, CGRect)     = NULL;
-static void (*orig_setTransform)(id, SEL, CATransform3D) = NULL;
 
 static UIWindow *g_win = nil;
 static UILabel   *g_valLabel = nil;
@@ -58,71 +56,83 @@ static void stretchMetalLayer(CALayer *l) {
     @try {
         CGRect f = l.frame;
         CGFloat W = f.size.width, H = f.size.height;
-        if (W <= 0 || H <= 0) return;
-        CGFloat S = (W / H) / g_aspect;          // 19.5:9 / 4:3 = ~1.626
-        if (S <= 1.002 || S > 4.0) return;
-        if (!l.affineTransform.a && !l.affineTransform.d)
-            fprintf(stderr, "[Stretch] stretch: layer=%.0fx%.0f S=%.4f\n", W, H, S);
+        if (!(W > 1.0) || !(H > 1.0)) return;           // отсекаем NaN и мусор
+        if (!isfinite(W) || !isfinite(H)) return;
+        if (!isfinite(f.origin.x) || !isfinite(f.origin.y)) return;
+        CGFloat S = (W / H) / g_aspect;                 // 19.5:9 / 4:3 = ~1.626
+        if (!isfinite(S) || S <= 1.002 || S > 4.0) return;   // ВАЖНО: проверка NaN
         CGFloat cx = f.origin.x + W * 0.5f;
         CGFloat cy = f.origin.y + H * 0.5f;
+        if (!isfinite(cx) || !isfinite(cy)) return;
         // растяжение относительно центра: T(-c) * Scale(S,1) * T(c)
         CGAffineTransform t =
             CGAffineTransformConcat(CGAffineTransformMakeTranslation(-cx, -cy),
               CGAffineTransformConcat(CGAffineTransformMakeScale(S, 1.0),
                                       CGAffineTransformMakeTranslation(cx, cy)));
+        if (!CGAffineTransformIsIdentity(l.affineTransform) && !l.affineTransform.a &&
+            !l.affineTransform.d)
+            fprintf(stderr, "[Stretch] stretch: layer=%.0fx%.0f S=%.4f\n", W, H, S);
         if (!CGAffineTransformEqualToTransform(l.affineTransform, t))
             l.affineTransform = t;
     } @catch (id e) {}
 }
 
-static int isMetal(id o) {
+// -------- обход дерева слоёв: ищем CAMetalLayer, кэшируем, тянем каждый кадр
+static NSMutableArray *g_metalLayers = nil;
+
+static void findMetalLayers(void) {
     @try {
         Class ml = NSClassFromString(@"CAMetalLayer");
-        return ml ? [o isKindOfClass:ml] : 0;
-    } @catch (id e) { return 0; }
-}
-
-// хуки сеттеров: движок сбрасывает frame/bounds/transform при каждом resize —
-// после его вызова возвращаем наш масштаб
-static void hook_setFrame(id s, SEL c, CGRect r) {
-    @try { if (orig_setFrame) orig_setFrame(s, c, r); } @catch (id e) {}
-    if (isMetal(s)) stretchMetalLayer((CALayer *)s);
-}
-static void hook_setBounds(id s, SEL c, CGRect r) {
-    @try { if (orig_setBounds) orig_setBounds(s, c, r); } @catch (id e) {}
-    if (isMetal(s)) stretchMetalLayer((CALayer *)s);
-}
-static void hook_setTransform(id s, SEL c, CATransform3D t) {
-    @try { if (orig_setTransform) orig_setTransform(s, c, t); } @catch (id e) {}
-    if (isMetal(s)) stretchMetalLayer((CALayer *)s);
-}
-
-static void stretchAllMetalLayers(void) {
-    @try {
+        if (!ml) return;
+        if (g_metalLayers) [g_metalLayers removeAllObjects];
+        else g_metalLayers = [NSMutableArray array];
         for (UIWindow *w in UIApplication.sharedApplication.windows) {
-            if ((id)w == (id)g_win) continue;                 // меню не трогаем
-            Class ml = NSClassFromString(@"CAMetalLayer");
-            if (!ml) return;
+            if ((id)w == (id)g_win) continue;              // меню не трогаем
             NSMutableArray *q = [NSMutableArray arrayWithObject:w.layer];
             while (q.count) {
-                CALayer *l = q.firstObject; [q removeObjectAtIndex:0];
-                if ([l isKindOfClass:ml]) stretchMetalLayer(l);
+                CALayer *l = q.firstObject;
+                [q removeObjectAtIndex:0];
+                if ([l isKindOfClass:ml]) [g_metalLayers addObject:l];
                 for (CALayer *sub in (NSArray *)l.sublayers) [q addObject:sub];
             }
         }
     } @catch (id e) {}
 }
 
+static void stretchAllMetalLayers(void) {
+    if (!g_spoofOn || g_aspect <= 0.01) return;
+    if (!g_metalLayers.count) findMetalLayers();
+    for (CALayer *l in (NSArray *)g_metalLayers) {
+        if (!l) continue;
+        @try {
+            if (l.superlayer) stretchMetalLayer(l);
+        } @catch (id e) {}
+    }
+}
+
+@interface StretchMenu : NSObject
++ (void)show; + (void)hide; + (void)pick:(id)s;
++ (void)sliderChanged:(id)s; + (void)toggle:(id)s;
++ (void)onFrame:(id)s;
+@end
+
 static void startStretcher(void) {
     static dispatch_once_t once;
     dispatch_once(&once, ^{
-        dispatch_queue_t q = dispatch_get_main_queue();
-        __block void (^tick)(void);
-        tick = ^{
-            stretchAllMetalLayers();
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)), q, tick);
-        };
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), q, tick);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            @try {
+                findMetalLayers();
+                fprintf(stderr, "[Stretch] metal layers found: %lu\n",
+                        (unsigned long)g_metalLayers.count);
+                CADisplayLink *dl = [CADisplayLink displayLinkWithTarget:
+                                     [StretchMenu class]
+                                                             selector:@selector(onFrame:)];
+                [dl addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
+            } @catch (id e) {
+                fprintf(stderr, "[Stretch] displaylink error: %s\n",
+                        [[e description] UTF8String]);
+            }
+        });
     });
 }
 
@@ -136,12 +146,11 @@ static void forceRereadBounds(void) {
 }
 
 // ------------------------------------------------------------------- меню
-@interface StretchMenu : NSObject
-+ (void)show; + (void)hide; + (void)pick:(id)s;
-+ (void)sliderChanged:(id)s; + (void)toggle:(id)s;
-@end
-
 @implementation StretchMenu
+
+// вызывается CADisplayLink каждый кадр — накладываем масштаб заново,
+// потому что движок сбрасывает геометрию слоя при resize
++ (void)onFrame:(id)s { stretchAllMetalLayers(); }
 
 + (UILabel *)lbl:(NSString *)t size:(CGFloat)s {
     UILabel *l = [UILabel new];
@@ -297,18 +306,10 @@ static void init_stretch(void) {
                     orig_nativeBounds = (CGRect(*)(id, SEL))method_getImplementation(mnb);
                     method_setImplementation(mnb, (IMP)hook_nativeBounds);
                 }
-                // --- 2. перехват сброса геометрии слоя рендера ---
-                Class cl = [CALayer class];
-                Method mf = class_getInstanceMethod(cl, @selector(setFrame:));
-                if (mf) { orig_setFrame = (void(*)(id, SEL, CGRect))method_getImplementation(mf);
-                          method_setImplementation(mf, (IMP)hook_setFrame); }
-                Method mb2 = class_getInstanceMethod(cl, @selector(setBounds:));
-                if (mb2) { orig_setBounds = (void(*)(id, SEL, CGRect))method_getImplementation(mb2);
-                           method_setImplementation(mb2, (IMP)hook_setBounds); }
-                Method mt = class_getInstanceMethod(cl, @selector(setTransform:));
-                if (mt) { orig_setTransform = (void(*)(id, SEL, CATransform3D))method_getImplementation(mt);
-                          method_setImplementation(mt, (IMP)hook_setTransform); }
-                fprintf(stderr, "[Stretch] hooks installed\n");
+                // Хуки setFrame/setBounds/setTransform на CALayer УБРАНЫ:
+                // они били по всем слоям процесса и роняли игру.
+                // Растяжку каждый кадр накладывает CADisplayLink (onFrame:).
+                fprintf(stderr, "[Stretch] hooks installed (bounds/nativeBounds)\n");
             } @catch (id e) {
                 fprintf(stderr, "[Stretch] hook error: %s\n", [[e description] UTF8String]);
             }
