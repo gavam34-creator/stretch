@@ -9,8 +9,8 @@
 
 static double g_aspect = 4.0 / 3.0;   // текущий (меняется из меню)
 
-static void (*orig_bounds)(id, SEL);
-static void (*orig_nativeBounds)(id, SEL);
+static CGRect (*orig_bounds)(id, SEL) = NULL;
+static CGRect (*orig_nativeBounds)(id, SEL) = NULL;
 
 static CGRect spoof(CGRect r) {
     if (g_aspect <= 0.01) return r;                    // выключено
@@ -151,10 +151,10 @@ static void init_stretch(void) {
         dispatch_async(dispatch_get_main_queue(), ^{
             Class cls = [UIScreen mainScreen].class;
             Method mb = class_getInstanceMethod(cls, @selector(bounds));
-            if (mb) { orig_bounds = (void*)method_getImplementation(mb);
+            if (mb) { orig_bounds = (CGRect(*)(id,SEL))method_getImplementation(mb);
                       method_setImplementation(mb, (IMP)hook_bounds); }
             Method mnb = class_getInstanceMethod(cls, @selector(nativeBounds));
-            if (mnb) { orig_nativeBounds = (void*)method_getImplementation(mnb);
+            if (mnb) { orig_nativeBounds = (CGRect(*)(id,SEL))method_getImplementation(mnb);
                        method_setImplementation(mnb, (IMP)hook_nativeBounds); }
             fprintf(stderr, "[Stretch] init aspect=%.3f\n", g_aspect);
         });
