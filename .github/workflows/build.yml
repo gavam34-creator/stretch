@@ -12,13 +12,20 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Select Xcode 15.4
-        uses: maxim-lobanov/setup-xcode-action@v1
-        with:
-          xcode-version: '15.4'
-
       - name: Show files
         run: ls -la
+
+      - name: Select a working Xcode
+        run: |
+          echo "=== Installed Xcodes ==="
+          ls -1 /Applications | grep -i xcode || true
+          # по умолчанию используем текущий, но если есть 15.x — берём его для стабильности Dobby
+          if [ -d "/Applications/Xcode_15.4.app" ]; then
+            sudo xcode-select -s /Applications/Xcode_15.4.app
+            echo "Selected Xcode 15.4"
+          fi
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-path
 
       - name: Build Dobby (static lib, iphoneos arm64)
         run: |
