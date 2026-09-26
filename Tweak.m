@@ -1,11 +1,7 @@
 #import <UIKit/UIKit.h>
 #import <mach-o/dyld.h>
-#import <objc/runtime.h>
+#import "dobby.h"
 
-// Dobby — встроенный hook-движок, не требует substrate
-extern void *DobbyHook(void *address, void *replace, void **origin);
-
-// Офсет из Ghidra (file-offset от базы 0x100000000)
 #define RESIZE_OFFSET 0x032D3AC0
 #define BASE_VADDR    0x100000000
 
