@@ -19,12 +19,15 @@ extern const char *_dyld_get_image_name(int32_t index);
 //  B) UEngine+0x7C = 1 (MaintainXFOV) — через vm_read_overwrite/vm_write
 //  C) contentsGravity=Resize на главном слое — KVC, БЕЗ глобального хука
 //
-//  ФИКСЫ v6:
-//   1. vm_read_overwrite / vm_write вместо прямого разыменования
-//      -> SIGSEGV невозможен, KERN_INVALID_ADDRESS вместо краха
-//   2. Хук setContentsGravity: УБРАН. Форсим слой точечно через KVC.
-//   3. Retry стоп после 3 подряд OVERRIDDEN (движок победил)
-//   4. Проверка orig_bounds != NULL перед вызовом
+//  ФИКСЫ v8:
+//   1. Убран гейт по UEngine::ViewportClient из read/write. Он ломал всё:
+//      на 7-й секунде вьюпорт ещё NULL -> и чтение, и запись молча
+//      блокировались, отсюда был "read: -1" при живом движке.
+//   2. Гейт заменён на vtable-проверку (первые 8 байт != NULL).
+//   3. Окно ретрая 15с -> 60с, стартует ВСЕГДА, независимо от ok.
+//   4. diagnoseEngine(): пошаговая печать, локализует обрыв до шага.
+//   5. autoScanAspectFlag(): если +0x7C не 0/1/2 - скан байта рядом.
+//   6. Кнопка DIAG в меню.
 // =============================================================================
 
 #define GENGINE_OFF  0xA8A8A0UL
@@ -127,61 +130,147 @@ static void *genginePtrSafe(void) {
     return e;
 }
 
+// --- признак "это UObject" -------------------------------------------------
+// Проверять одно выравнивание бессмысленно: указатель бывает выровнен и при
+// этом мусором. Настоящий признак - первые 8 байт это не-NULL vtable.
+// ВАЖНО: vtable тоже читаем через vm_read, прямого разыменования тут нет.
+static int plausibleEngine(void *e) {
+    if (!e) return 0;
+    uintptr_t a = (uintptr_t)e;
+    if (a < 0x1000) return 0;
+    if (a & 0x7) return 0;
+    void *vt = NULL;
+    if (!safeReadPtr(a, &vt)) return 0;
+    if (!vt) return 0;
+    if ((uintptr_t)vt < 0x1000) return 0;
+    return 1;
+}
+
+// Если по +0x7C приходит не 0/1/2 - ищем байт-кандидат рядом.
+// Эвристика: значение 0..2 И в пределах +-16 байт есть непустой 8-байтный
+// указатель (соседнее свойство-указатель).
+static long autoScanAspectFlag(void) {
+    void *e = genginePtrSafe();
+    if (!e) { fprintf(stderr, "[Stretch] scan: no engine\n"); return -1; }
+    uintptr_t p = (uintptr_t)e;
+    long found = -1;
+    int n = 0;
+    for (uintptr_t off = 0x50; off <= 0xB0; off++) {
+        uint8_t v = 0;
+        if (!safeRead8(p + off, &v)) continue;
+        if (v > 2) continue;
+        int near = 0;
+        for (int d = 8; d <= 16; d += 8) {
+            void *nb = NULL;
+            if (safeReadPtr(p + off + d, &nb) && nb && (uintptr_t)nb > 0x1000) near = 1;
+            if (safeReadPtr(p + off - d, &nb) && nb && (uintptr_t)nb > 0x1000) near = 1;
+        }
+        if (!near) continue;
+        fprintf(stderr, "[Stretch] scan: +0x%02lX = %u (рядом указатель)\n",
+                (unsigned long)off, (unsigned)v);
+        if (found < 0) found = (long)off;
+        n++;
+    }
+    fprintf(stderr, "[Stretch] scan done: %d кандидат(ов)\n", n);
+    return found;
+}
+
+// Пошаговая диагностика: показывает РОВНО на каком шаге обрыв.
+static void diagnoseEngine(void) {
+    fprintf(stderr, "[Stretch] ===== DIAG =====\n");
+    if (!g_base) g_base = findGameBase();
+    fprintf(stderr, "[Stretch] DIAG images=%d base=%p slot=%p\n",
+            (int)_dyld_image_count(), (void *)g_base, (void *)(g_base + GENGINE_OFF));
+    if (!g_base) { fprintf(stderr, "[Stretch] DIAG FAIL: base не найден\n"); return; }
+
+    void *e = NULL;
+    vm_size_t sz = sizeof(void *);
+    kern_return_t kr = vm_read_overwrite(mach_task_self(),
+                                         (vm_address_t)(g_base + GENGINE_OFF),
+                                         sizeof(void *), (vm_address_t)&e, &sz);
+    fprintf(stderr, "[Stretch] DIAG slot kr=%d engine=%p\n", (int)kr, e);
+    if (kr != KERN_SUCCESS) {
+        fprintf(stderr, "[Stretch] DIAG FAIL: kr=%d (1=PROTECTION, 14=INVALID)\n", (int)kr);
+        return;
+    }
+    if (!e) {
+        fprintf(stderr, "[Stretch] DIAG FAIL: GEngine==NULL -> движок не поднят\n");
+        return;
+    }
+    if (!plausibleEngine(e)) {
+        fprintf(stderr, "[Stretch] DIAG FAIL: %p не похож на UObject\n", e);
+        return;
+    }
+
+    void *vt = NULL, *vpc = NULL;
+    uint8_t flag = 0xFF;
+    safeReadPtr((uintptr_t)e, &vt);
+    safeReadPtr((uintptr_t)e + UENG_VPCL, &vpc);
+    int fok = safeRead8((uintptr_t)e + UENG_ASPECT, &flag);
+    fprintf(stderr, "[Stretch] DIAG vtable=%p vpc@+%d=%p flag@+%d=%s%u\n",
+            vt, UENG_VPCL, vpc, UENG_ASPECT, fok ? "" : "НЕ ЧИТАЕТСЯ, ",
+            (unsigned)(fok ? flag : 0));
+
+    fprintf(stderr, "[Stretch] DIAG dump:");
+    for (int off = 0x50; off <= 0xB0; off += 8) {
+        void *q = NULL;
+        if (safeReadPtr((uintptr_t)e + off, &q)) fprintf(stderr, " %02X=%p", off, q);
+        else                                            fprintf(stderr, " %02X=??", off);
+    }
+    fprintf(stderr, "\n");
+    if (fok && flag <= 2) {
+        fprintf(stderr, "[Stretch] DIAG OK: +%d похож на enum\n", UENG_ASPECT);
+    } else {
+        fprintf(stderr, "[Stretch] DIAG WARN: +%d не 0/1/2, скан\n", UENG_ASPECT);
+        autoScanAspectFlag();
+    }
+    fprintf(stderr, "[Stretch] ===== /DIAG =====\n");
+}
+
 static int readEngineAspect(void) {
     void *e = genginePtrSafe();
-    if (!e) return -1;
-    uintptr_t p = (uintptr_t)e;
-    if ((p & 0x7) != 0) return -1;
-
-    void *vpc = NULL;
-    if (!safeReadPtr(p + UENG_VPCL, &vpc)) return -1;
-    if (!vpc) return -1;
-
+    if (!plausibleEngine(e)) return -1;
     uint8_t v = 0;
-    if (!safeRead8(p + UENG_ASPECT, &v)) return -1;
+    if (!safeRead8((uintptr_t)e + UENG_ASPECT, &v)) return -1;
     return (int)v;
 }
 
 static int writeEngineAspect(int v) {
     if (v < 0 || v > 2) return 0;
-
     void *e = genginePtrSafe();
-    if (!e) return 0;
-    uintptr_t p = (uintptr_t)e;
-    if ((p & 0x7) != 0) return 0;
-
-    void *vpc = NULL;
-    if (!safeReadPtr(p + UENG_VPCL, &vpc)) return 0;
-    if (!vpc) return 0;
-
-    if (!safeWrite8(p + UENG_ASPECT, (uint8_t)v)) return 0;
-
+    // Гейт ТОЛЬКО на vtable. Раньше здесь стояла проверка ViewportClient!=NULL,
+    // и это ломало всё: вьюпорт на 7-й секунде ещё NULL, и обе операции
+    // молча блокировались.
+    if (!plausibleEngine(e)) return 0;
+    if (!safeWrite8((uintptr_t)e + UENG_ASPECT, (uint8_t)v)) return 0;
     uint8_t verify = 0;
-    if (safeRead8(p + UENG_ASPECT, &verify)) g_engineLast = verify;
+    if (safeRead8((uintptr_t)e + UENG_ASPECT, &verify)) g_engineLast = verify;
     return 1;
 }
 
 static void engineAspectRetry(int idx) {
-    if (idx > 10) {
-        int now = readEngineAspect();
+    if (idx > 40) {                       // 40 * 1.5c = 60 секунд
         fprintf(stderr, "[Stretch] engine final: want=%d read=%d overrides=%d\n",
-                g_engineWant, now, g_engineOverrides);
+                g_engineWant, readEngineAspect(), g_engineOverrides);
         return;
     }
+    if (g_engineWant < 0) return;
+
+    int before = readEngineAspect();
+    int ok = writeEngineAspect(g_engineWant);
+    int after = readEngineAspect();
+    if (ok && after != g_engineWant) g_engineOverrides++;
+
+    if (idx <= 2 || (idx % 10) == 0 || ok == 0) {
+        fprintf(stderr, "[Stretch] engine try#%d want=%d ok=%d before=%d after=%d\n",
+                idx, g_engineWant, ok, before, after);
+    }
+    if (idx == 4 || idx == 20 || idx == 40) diagnoseEngine();
+
     if (g_engineOverrides >= 3) {
-        fprintf(stderr, "[Stretch] engine retry STOP: game wins (overrides=%d)\n",
+        fprintf(stderr, "[Stretch] engine retry STOP: игра перебивает (overrides=%d)\n",
                 g_engineOverrides);
         return;
-    }
-    if (g_engineWant >= 0) {
-        int before = readEngineAspect();
-        int ok = writeEngineAspect(g_engineWant);
-        int after = readEngineAspect();
-        if (ok && after != g_engineWant) g_engineOverrides++;
-        if (idx == 0 || idx == 5) {
-            fprintf(stderr, "[Stretch] engine try#%d want=%d ok=%d before=%d after=%d\n",
-                    idx, g_engineWant, ok, before, after);
-        }
     }
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{ engineAspectRetry(idx + 1); });
@@ -198,7 +287,10 @@ static void engineAspectSet(int v) {
     int ok = writeEngineAspect(v);
     fprintf(stderr, "[Stretch] engine set want=%d ok=%d read=%d\n",
             v, ok, readEngineAspect());
-    if (ok) engineAspectRetry(1);
+    // Ретай запускаем ВСЕГДА: если на 7-й секунде GEngine ещё NULL или объект
+    // не прошёл гейт, движок поднимается на 15-20-й секунде.
+    engineAspectRetry(1);
+    if (!ok) diagnoseEngine();
     if (g_engLabel) {
         g_engLabel.text = [NSString stringWithFormat:@"ENGINE: %d (read %d)",
                                                        v, readEngineAspect()];
@@ -254,6 +346,7 @@ static void forceMainLayerGravityOnce(void) {
 + (void)modeABC:(id)s;
 + (void)engPick:(id)s;
 + (void)aspPick:(id)s;
++ (void)diag:(id)s;
 @end
 
 @implementation StretchMenu
@@ -344,6 +437,19 @@ static double safeDoubleFromSender(id sender) {
     fprintf(stderr, "[Stretch] aspect = %.3f\n", a);
 }
 
++ (void)diag:(id)sender {
+    diagnoseEngine();
+    long scan = autoScanAspectFlag();
+    int r = readEngineAspect();
+    if (g_engLabel) {
+        g_engLabel.text = [NSString stringWithFormat:@"read %d  base %p  %@",
+                                                       r, (void *)g_base,
+                                                       scan < 0 ? @"scan none" :
+                                        [NSString stringWithFormat:@"+0x%lX", scan]];
+    }
+    if (g_status) g_status.text = @"DIAG: смотри консоль";
+}
+
 + (void)show {
     dispatch_async(dispatch_get_main_queue(), ^{
         if (g_win) return;
@@ -360,7 +466,7 @@ static double safeDoubleFromSender(id sender) {
             box.layer.borderWidth = 1;
             box.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.2].CGColor;
 
-            UILabel *title = [self lbl:@"STRETCH v6  FINAL" size:14];
+            UILabel *title = [self lbl:@"STRETCH v8" size:14];
             title.frame = CGRectMake(0, 10, BW, 20);
 
             g_status = [self lbl:@"MODE: idle" size:11];
@@ -428,6 +534,15 @@ static double safeDoubleFromSender(id sender) {
             }
             y += 38;
 
+            UIButton *db = [self btn:@"DIAG  (console)" h:30];
+            db.frame = CGRectMake(15, y, BW - 30, 30);
+            db.titleLabel.font = [UIFont monospacedSystemFontOfSize:11
+                                                          weight:UIFontWeightBold];
+            [db addTarget:self action:@selector(diag:)
+                  forControlEvents:UIControlEventTouchUpInside];
+            [box addSubview:db];
+            y += 36;
+
             UILabel *h2 = [self lbl:@"3-finger double-tap = close" size:10];
             h2.textColor = [UIColor colorWithWhite:1 alpha:0.5];
             h2.frame = CGRectMake(0, BH - 22, BW, 16);
@@ -491,7 +606,7 @@ static void installGesture(void) {
 __attribute__((constructor))
 static void init_stretch(void) {
     @autoreleasepool {
-        fprintf(stderr, "[Stretch] v6 init\n");
+        fprintf(stderr, "[Stretch] v8 init\n");
 
         dispatch_async(dispatch_get_main_queue(), ^{
             @try {
