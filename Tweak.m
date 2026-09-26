@@ -28,8 +28,8 @@
 #define TARGET_ASPECT    (4.0 / 3.0)
 
 // --- ЧТО ВКЛЮЧИТЬ ------------------------------------------------------------
-#define ENABLE_GAME_HOOKS 1    // хук функций игры по офсетам (нужны офсеты!)
-#define ENABLE_UISPOOF    0    // спуффинг UIScreen (letterbox-эффект, без оффсетов)
+#define ENABLE_GAME_HOOKS 0    // хук функций игры (впиши офсеты, если есть)
+#define ENABLE_UISPOOF    1    // спуффинг UIScreen -> 4:3 растяжка (сработало!)
 
 static double targetAspect = TARGET_ASPECT;
 static int debugCalls = 0;
