@@ -64,7 +64,8 @@ jobs:
             -miphoneos-version-min=14.0 \
             -I"$DOBBY_INC" \
             -Wl,-install_name,@executable_path/Frameworks/Stretch.dylib \
-            -o Stretch.dylib Tweak.m "$DOBBY_LIB"
+            -o Stretch.dylib Tweak.m "$DOBBY_LIB" \
+            -lc++
 
       - name: Verify dylib
         run: |
