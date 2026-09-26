@@ -31,7 +31,7 @@ jobs:
         run: |
           xcrun --sdk iphoneos clang -arch arm64 \
             -dynamiclib \
-            -framework UIKit -framework Foundation -framework CoreGraphics \
+            -framework UIKit -framework Foundation -framework CoreGraphics -framework QuartzCore \
             -isysroot $(xcrun --sdk iphoneos --show-sdk-path) \
             -miphoneos-version-min=14.0 \
             -Wl,-install_name,@executable_path/Frameworks/Stretch.dylib \
