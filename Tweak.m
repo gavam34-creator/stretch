@@ -9,23 +9,16 @@
 #import "dobby.h"
 
 // ---------------------------------------------------------------------------
-// Оффсет FSceneViewport::ResizeViewport — file-offset в ShadowTrackerExtra.
-// Кандидат (символов в бинаре нет, имя не подтвердить) — подобран по сигнатуре
-// "store w1,w2 -> [x0]". Чтобы НЕ гадать, ниже логируется каждый вызов:
-// смотри в консоли, печатается ли inX/inY ~ размер экрана (сотни/тысячи).
-// Если печатается inY ~ 1290/2796 — это viewport-функция, всё ок.
-// Если не печатается — офсет не тот; есть запасные кандидаты (см. CANDIDATES).
+// ВАЖНО: оффсет 0x032D3AC0 — НЕ FSceneViewport::ResizeViewport (проверено
+// в Ghidra: это менеджер рендер-таргетов, пробрасывающий размер в дочерние
+// вьюпорты). Хук с ИЗМЕНЕНИЕМ аргументов по этому адресу роняет игру.
+// Поэтому APPLY_STRETCH=0 по умолчанию: хук только ЛОГИРУЕТ, аргументы не
+// трогает — игра не падает. Для растяжки нужен ВЕРНЫЙ офсет + APPLY_STRETCH=1.
 // ---------------------------------------------------------------------------
-#define RESIZE_OFFSET 0x032D3AC0   // vaddr 0x1032D3AC0, размер 144
+#define RESIZE_OFFSET 0x032D3AC0   // кандидат (НЕ ResizeViewport) — только лог!
 #define BASE_VADDR    0x100000000   // __TEXT.vmaddr (image base, iOS arm64)
 
-// Запасные кандидаты с той же сигнатурой (если основной не сработает):
-//   0x032D3B50  144   (1032D3B50, близнец, пишет в +0x4E4)
-//   0x05BA6414  172
-//   0x061E1E18  216
-//   0x069816A0  216
-//   0x0154D050  240
-//   0x01EBCA08  268
+#define APPLY_STRETCH  0            // 0 = только лог (безопасно), 1 = растяжка
 
 // Целевой aspect — ШИРОКАЯ растяжка. Натив iPhone 14 Pro Max = 19.5:9 (2.167).
 // Ставь БОЛЬШЕ 2.167, чтобы обзор по горизонтали стал шире:
@@ -35,12 +28,11 @@
 static double targetAspect = TARGET_ASPECT;
 static BOOL stretchEnabled = YES;
 static int debugCalls = 0;
-#define MAX_DEBUG_CALLS 20
+#define MAX_DEBUG_CALLS 40
 
 static void (*orig_ResizeViewport)(void *self, uint32_t sizeX, uint32_t sizeY);
 
-// Защита: трогаем аргументы только если они похожи на размер экрана,
-// чтобы случайный неверный хук не портил данные.
+// Защита: трогаем аргументы только если они похожи на размер экрана.
 static int looksLikeScreenSize(uint32_t x, uint32_t y) {
     return (x >= 200 && x <= 8000) && (y >= 200 && y <= 4000);
 }
@@ -48,12 +40,12 @@ static int looksLikeScreenSize(uint32_t x, uint32_t y) {
 static void hook_ResizeViewport(void *self, uint32_t sizeX, uint32_t sizeY) {
     if (orig_ResizeViewport == NULL) return;
 
+#if APPLY_STRETCH
     if (stretchEnabled && sizeY > 0 && looksLikeScreenSize(sizeX, sizeY)) {
         uint32_t newX = (uint32_t)(sizeY * targetAspect);
         newX = (newX + 4) & ~7u;   // выровнять по 8
         if (debugCalls < MAX_DEBUG_CALLS) {
-            fprintf(stderr, "[Stretch] ResizeViewport in=(%u,%u) -> out=(%u,%u)\n",
-                    sizeX, sizeY, newX, sizeY);
+            fprintf(stderr, "[Stretch] RV in=(%u,%u) -> out=(%u,%u)\n", sizeX, sizeY, newX, sizeY);
             debugCalls++;
         }
         if (newX > 0 && newX != sizeX) {
@@ -61,6 +53,14 @@ static void hook_ResizeViewport(void *self, uint32_t sizeX, uint32_t sizeY) {
             return;
         }
     }
+#else
+    // Безопасный режим: только лог, аргументы НЕ меняем (иначе краш).
+    if (debugCalls < MAX_DEBUG_CALLS && looksLikeScreenSize(sizeX, sizeY)) {
+        fprintf(stderr, "[Stretch][log-only] this=%p sizeX=%u sizeY=%u\n",
+                (void *)self, sizeX, sizeY);
+        debugCalls++;
+    }
+#endif
     orig_ResizeViewport(self, sizeX, sizeY);
 }
 
