@@ -4,36 +4,87 @@
 #import <QuartzCore/QuartzCore.h>
 
 // =============================================================================
-//  WORKUP STRETCH — меню: открывается 3-пальцевым двойным тапом, выбор aspect.
-//  Дефолт: 1440x1080 (4:3). Кадр ПРИНУДИТЕЛЬНО растягивается на весь экран
-//  (contentsGravity=resize) -> растяжка без чёрных полос.
+//  WORKUP STRETCH — 4:3 stretch без чёрных полос (PUBG Mobile VNG, UE4).
+//  Механика (доказана экспериментом: 21:9 спуфит = контент вылезает за края,
+//  значит игра читает UIScreen и рендерит реальный аспект):
+//  1) UIScreen.bounds/nativeBounds + UIScreenMode.size  -> 4:3 (w = h * 1.333)
+//  2) UIWindow.bounds + CAMetalLayer.drawableSize       -> 4:3 (если игра кэширует)
+//  3) CAMetalLayer.contentsGravity = kCAGravityResize   -> кадр растягивается
+//     на весь экран (без letterbox/полос).
+//  Активация спуфинга — через 4 сек после старта (g_spoofOn), чтобы не сломать
+//  инициализацию движка.
 // =============================================================================
 
-// Текущий aspect. По умолчанию 1440x1080 = 4:3 (1.333) — «ПК-вид».
-static double g_aspect = 1440.0 / 1080.0;   // 4:3
+// ---- состояние ----
+static double g_aspect = 1440.0 / 1080.0;   // 4:3 по умолчанию
+static volatile int g_spoofOn = 0;          // 0 до задержки, потом 1
 
-// Игра кэширует размер экрана. Чтобы смена aspect применилась — шлём
-// уведомление об ориентации, чтобы движок перечитал bounds и перестроил вьюпорт.
-static void forceRereadBounds(void) {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        [[NSNotificationCenter defaultCenter]
-            postNotificationName:UIDeviceOrientationDidChangeNotification object:nil];
-    });
+// ---- оригинальные реализации ----
+static CGRect (*orig_bounds)(id, SEL)        = NULL;
+static CGRect (*orig_nativeBounds)(id, SEL)  = NULL;
+static CGRect (*orig_winBounds)(id, SEL)     = NULL;
+static CGSize (*orig_modeSize)(id, SEL)      = NULL;
+static CGSize (*orig_drawableSize)(id, SEL)  = NULL;
+
+static UIWindow *g_win = nil;   // наше меню (исключаем из спуфинга)
+
+// =============================================================================
+//  1) ЦЕНТРАЛЬНЫЙ СПУФИНГ: height сохраняем, width = height * aspect (4:3)
+// =============================================================================
+static CGRect spoof(CGRect r) {
+    if (!g_spoofOn) return r;                 // ещё не активировано
+    if (g_aspect <= 0.01) return r;           // "off"
+    CGFloat w = r.size.width, h = r.size.height;
+    if (w <= 0 || h <= 0 || w <= h) return r;
+    CGFloat nw = round(h * g_aspect);
+    if (nw < 64 || nw > w * 3.0f) return r;   // санитарный предохранитель
+    return CGRectMake(r.origin.x + (w - nw) * 0.5f, r.origin.y, nw, h); // по центру
+}
+static CGSize spoofSize(CGSize s) {
+    if (!g_spoofOn) return s;
+    if (g_aspect <= 0.01 || s.width <= 0 || s.height <= 0 || s.width <= s.height) return s;
+    CGFloat nw = round(s.height * g_aspect);
+    if (nw < 16 || nw > s.width * 3.0f) return s;
+    return CGSizeMake(nw, s.height);
 }
 
-// ---- РАСТЯЖКА БЕЗ ПОЛОС: заставляем Metal-слой растягивать кадр на весь экран
-// 1) рекурсивно ищем все CAMetalLayer в окнах приложения
-// 2) ставим contentsGravity = kCAGravityResize => 4:3-кадр тянется на всю ширину
+// a) UIScreen.bounds
+static CGRect hook_bounds(id s, SEL c) {
+    return spoof(orig_bounds ? orig_bounds(s, c) : CGRectZero);
+}
+//    UIScreen.nativeBounds — если движок читает его
+static CGRect hook_nativeBounds(id s, SEL c) {
+    return spoof(orig_nativeBounds ? orig_nativeBounds(s, c) : CGRectZero);
+}
+//    UIWindow.bounds — если движок кэширует bounds окна. Наше меню не трогаем.
+static CGRect hook_winBounds(id s, SEL c) {
+    if ((id)s == (id)g_win) return orig_winBounds ? orig_winBounds(s, c) : CGRectZero;
+    return spoof(orig_winBounds ? orig_winBounds(s, c) : CGRectZero);
+}
+//    UIScreenMode.size (это и есть UIScreen.currentMode.size)
+static CGSize hook_modeSize(id s, SEL c) {
+    return spoofSize(orig_modeSize ? orig_modeSize(s, c) : CGSizeZero);
+}
+//    CAMetalLayer.drawableSize — движок читает его для вьюпорта/текстуры
+static CGSize hook_drawableSize(id s, SEL c) {
+    return spoofSize(orig_drawableSize ? orig_drawableSize(s, c) : CGSizeZero);
+}
+
+// =============================================================================
+//  3) РАСТЯЖКА КАДРА НА ВЕСЬ ЭКРАН: contentsGravity = resize
+//     (если полосы рисовал слой через aspect-fit — они исчезают, кадр тянется)
+// =============================================================================
 static void fixLayersIn(CALayer *l, int depth) {
     if (!l) return;
     Class ml = NSClassFromString(@"CAMetalLayer");
     if (ml && [l isKindOfClass:ml]) {
-        l.contentsGravity = @"resize";   // растянуть (не сохранять пропорции) -> без полос
+        l.contentsGravity = @"resize";
         if (depth <= 2)
-            fprintf(stderr, "[Stretch] metal layer bounds=(%.0f x %.0f) gravity=%@\n",
-                    l.bounds.size.width, l.bounds.size.height, l.contentsGravity);
+            fprintf(stderr, "[Stretch] metal bounds=(%.0f x %.0f) gravity=%s\n",
+                    l.bounds.size.width, l.bounds.size.height,
+                    l.contentsGravity ? l.contentsGravity.UTF8String : "nil");
     }
-    for (CALayer *s in (NSArray *)l.sublayers) fixLayersIn(s, depth + 1);
+    for (CALayer *sub in (NSArray *)l.sublayers) fixLayersIn(sub, depth + 1);
 }
 static void fixAllLayers(void) {
     for (UIWindow *w in UIApplication.sharedApplication.windows) {
@@ -50,29 +101,21 @@ static void startLayerFixer(void) {
             fixAllLayers();
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)), q, tick);
         };
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.6 * NSEC_PER_SEC)), q, tick);
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), q, tick);
     });
 }
 
-static CGRect (*orig_bounds)(id, SEL) = NULL;
-static CGRect (*orig_nativeBounds)(id, SEL) = NULL;
-
-static CGRect spoof(CGRect r) {
-    if (g_aspect <= 0.01) return r;                    // выключено
-    CGFloat w = r.size.width, h = r.size.height;
-    if (w <= 0 || h <= 0 || w <= h) return r;
-    CGFloat nw = round(h * g_aspect);
-    if (nw < 64 || nw > w * 3.0f) return r;
-    return CGRectMake(r.origin.x + (w - nw) * 0.5f, r.origin.y, nw, h);
-}
-static CGRect hook_bounds(id s, SEL c) {
-    return spoof(orig_bounds ? orig_bounds(s, c) : CGRectZero);
-}
-static CGRect hook_nativeBounds(id s, SEL c) {
-    return spoof(orig_nativeBounds ? orig_nativeBounds(s, c) : CGRectZero);
+// Перечитать bounds (для меню, при смене aspect на лету)
+static void forceRereadBounds(void) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [[NSNotificationCenter defaultCenter]
+            postNotificationName:UIDeviceOrientationDidChangeNotification object:nil];
+    });
 }
 
-// ---------------------------------------------------------------- меню
+// =============================================================================
+//  МЕНЮ (aspect + ползунок). Открытие: 3 пальца + 2 тапа.
+// =============================================================================
 @interface StretchMenu : NSObject
 + (void)show;
 + (void)hide;
@@ -81,7 +124,6 @@ static CGRect hook_nativeBounds(id s, SEL c) {
 + (void)toggleMenu:(id)sender;
 @end
 
-static UIWindow *g_win = nil;
 static UILabel *g_valLabel = nil;
 static UISlider *g_slider = nil;
 
@@ -96,8 +138,8 @@ static UISlider *g_slider = nil;
 
 + (NSString *)fmtAspect:(double)a {
     if (a <= 0.01) return @"Native (off)";
-    return [NSString stringWithFormat:@"%.3f  (%.1f:1)%@", a, a,
-            (a <= 2.20 ? @"  [bars]" : @"  [no bars]")];
+    NSString *stretch = (a <= 2.20) ? @"strech fullscreen" : @"wide FOV";
+    return [NSString stringWithFormat:@"%.3f  (%.1f:1)  %@", a, a, stretch];
 }
 
 + (void)updateLabel {
@@ -108,7 +150,7 @@ static UISlider *g_slider = nil;
     UISlider *s = (UISlider *)sender;
     g_aspect = s.value;
     [self updateLabel];
-    forceRereadBounds();   // заставить игру перечитать bounds
+    forceRereadBounds();
 }
 
 + (UIButton *)mkBtn:(NSString *)t aspect:(double)a {
@@ -142,16 +184,15 @@ static UISlider *g_slider = nil;
         box.bounds = CGRectMake(0,0,250,430);
         box.center = CGPointMake(CGRectGetMidX(v.bounds), CGRectGetMidY(v.bounds));
 
-        UILabel *title = [self mkLabel:@"STRETCH  (drag = sides)" size:16];
+        UILabel *title = [self mkLabel:@"STRETCH 4:3  (drag = width)" size:15];
         title.frame = CGRectMake(0,10,250,24);
 
-        // ---- ползунок ширины (высота держится, тянешь вбок) ----
         g_valLabel = [self mkLabel:[self fmtAspect:g_aspect] size:15];
         g_valLabel.frame = CGRectMake(0,40,250,22);
 
         g_slider = [UISlider new];
-        g_slider.minimumValue = 1.0;      // узко (полосы)
-        g_slider.maximumValue = 3.5;      // ультра-широко
+        g_slider.minimumValue = 1.0;
+        g_slider.maximumValue = 3.5;
         g_slider.value = (float)MAX(1.0, MIN(3.5, g_aspect));
         g_slider.frame = CGRectMake(20,68,210,32);
         g_slider.minimumTrackTintColor = [UIColor systemGreenColor];
@@ -163,8 +204,7 @@ static UISlider *g_slider = nil;
         hintW.textColor = [UIColor colorWithWhite:1 alpha:0.5];
         hintW.frame = CGRectMake(0,98,250,16);
 
-        // ---- быстрые пресеты ----
-        NSArray *opts = @[@"Native 19.5:9 (off)",@"4:3",@"16:9",@"20:9",@"21:9",@"24:9",@"32:9"];
+        NSArray *opts = @[@"Native (off)",@"4:3",@"16:9",@"20:9",@"21:9",@"24:9",@"32:9"];
         double asp[] = {0.0, 4.0/3.0, 16.0/9.0, 20.0/9.0, 21.0/9.0, 24.0/9.0, 32.0/9.0};
         CGFloat y = 122;
         for (NSUInteger i = 0; i < opts.count; i++) {
@@ -204,14 +244,14 @@ static UISlider *g_slider = nil;
     UIButton *b = (UIButton *)sender;
     g_aspect = b.accessibilityIdentifier.doubleValue;
     [self hide];
-    forceRereadBounds();   // применить
+    forceRereadBounds();
 }
 
 + (void)toggleMenu:(id)sender { [self show]; }
 
 @end
 
-// gesture: ТОЛЬКО 3-пальцевый ДВОЙНОЙ тап — чтобы меню случайно не открывалось в бою
+// gesture: ТОЛЬКО 3 пальца + 2 тапа
 static void installGesture(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
         for (UIWindow *w in UIApplication.sharedApplication.windows) {
@@ -219,9 +259,9 @@ static void installGesture(void) {
             UITapGestureRecognizer *g =
                 [[UITapGestureRecognizer alloc] initWithTarget:[StretchMenu class]
                                                         action:@selector(toggleMenu:)];
-            g.numberOfTouchesRequired = 3;   // три пальца
-            g.numberOfTapsRequired   = 2;    // два раза
-            g.cancelsTouchesInView   = NO;   // не блокируем игру
+            g.numberOfTouchesRequired = 3;
+            g.numberOfTapsRequired   = 2;
+            g.cancelsTouchesInView   = NO;
             g.delaysTouchesBegan     = NO;
             [w addGestureRecognizer:g];
             break;
@@ -233,6 +273,7 @@ static void installGesture(void) {
 __attribute__((constructor))
 static void init_stretch(void) {
     @autoreleasepool {
+        fprintf(stderr, "[Stretch] init\n");
         dispatch_async(dispatch_get_main_queue(), ^{
             Class cls = [UIScreen mainScreen].class;
             Method mb = class_getInstanceMethod(cls, @selector(bounds));
@@ -241,9 +282,33 @@ static void init_stretch(void) {
             Method mnb = class_getInstanceMethod(cls, @selector(nativeBounds));
             if (mnb) { orig_nativeBounds = (CGRect(*)(id,SEL))method_getImplementation(mnb);
                        method_setImplementation(mnb, (IMP)hook_nativeBounds); }
-            fprintf(stderr, "[Stretch] init aspect=%.3f\n", g_aspect);
+
+            // fallback #2: UIWindow.bounds
+            Method wb = class_getInstanceMethod([UIWindow class], @selector(bounds));
+            if (wb) { orig_winBounds = (CGRect(*)(id,SEL))method_getImplementation(wb);
+                      method_setImplementation(wb, (IMP)hook_winBounds); }
+
+            // fallback #3: UIScreenMode.size (currentMode.size)
+            Class modeCls = NSClassFromString(@"UIScreenMode");
+            Method mm = modeCls ? class_getInstanceMethod(modeCls, @selector(size)) : NULL;
+            if (mm) { orig_modeSize = (CGSize(*)(id,SEL))method_getImplementation(mm);
+                      method_setImplementation(mm, (IMP)hook_modeSize); }
+
+            // fallback #2: CAMetalLayer.drawableSize
+            Class mlCls = NSClassFromString(@"CAMetalLayer");
+            Method dm = mlCls ? class_getInstanceMethod(mlCls, @selector(drawableSize)) : NULL;
+            if (dm) { orig_drawableSize = (CGSize(*)(id,SEL))method_getImplementation(dm);
+                      method_setImplementation(dm, (IMP)hook_drawableSize); }
+
+            fprintf(stderr, "[Stretch] hooks installed (aspect=%.3f)\n", g_aspect);
+
+            // Активация спуфинга ТОЛЬКО через 4 сек — не ломаем инициализацию
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(4.0 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
+                g_spoofOn = 1;
+                fprintf(stderr, "[Stretch] spoof on\n");
+            });
         });
-        // gesture: ставим и сразу, и позже (на случай смены окон)
         dispatch_async(dispatch_get_main_queue(), ^{ installGesture(); });
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 3*NSEC_PER_SEC),
                        dispatch_get_main_queue(), ^{ installGesture(); });
