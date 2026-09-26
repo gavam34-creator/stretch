@@ -1,10 +1,12 @@
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 #import <stdio.h>
+#import <QuartzCore/QuartzCore.h>
 
 // =============================================================================
-//  WORKUP STRETCH — меню: открывается 2/3-пальцевым тапом, выбор aspect.
-//  Широкие aspect (>= 19.5:9) убирают чёрные полосы. Меняется на лету.
+//  WORKUP STRETCH — меню: открывается 3-пальцевым двойным тапом, выбор aspect.
+//  Дефолт: 1440x1080 (4:3). Кадр ПРИНУДИТЕЛЬНО растягивается на весь экран
+//  (contentsGravity=resize) -> растяжка без чёрных полос.
 // =============================================================================
 
 // Текущий aspect. По умолчанию 1440x1080 = 4:3 (1.333) — «ПК-вид».
@@ -14,11 +16,41 @@ static double g_aspect = 1440.0 / 1080.0;   // 4:3
 // уведомление об ориентации, чтобы движок перечитал bounds и перестроил вьюпорт.
 static void forceRereadBounds(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
-        Class cls = [UIScreen mainScreen].class;
-        SEL will = NSSelectorFromString(@"setNeedsLayout");
-        if ([cls respondsToSelector:will]) [cls performSelector:will];
         [[NSNotificationCenter defaultCenter]
             postNotificationName:UIDeviceOrientationDidChangeNotification object:nil];
+    });
+}
+
+// ---- РАСТЯЖКА БЕЗ ПОЛОС: заставляем Metal-слой растягивать кадр на весь экран
+// 1) рекурсивно ищем все CAMetalLayer в окнах приложения
+// 2) ставим contentsGravity = kCAGravityResize => 4:3-кадр тянется на всю ширину
+static void fixLayersIn(CALayer *l, int depth) {
+    if (!l) return;
+    Class ml = NSClassFromString(@"CAMetalLayer");
+    if (ml && [l isKindOfClass:ml]) {
+        l.contentsGravity = @"resize";   // растянуть (не сохранять пропорции) -> без полос
+        if (depth <= 2)
+            fprintf(stderr, "[Stretch] metal layer bounds=(%.0f x %.0f) gravity=%@\n",
+                    l.bounds.size.width, l.bounds.size.height, l.contentsGravity);
+    }
+    for (CALayer *s in (NSArray *)l.sublayers) fixLayersIn(s, depth + 1);
+}
+static void fixAllLayers(void) {
+    for (UIWindow *w in UIApplication.sharedApplication.windows) {
+        fixLayersIn(w.layer, 0);
+        fixLayersIn(w.rootViewController.view.layer, 0);
+    }
+}
+static void startLayerFixer(void) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        dispatch_queue_t q = dispatch_get_main_queue();
+        __block void (^tick)(void);
+        tick = ^{
+            fixAllLayers();
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)), q, tick);
+        };
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.6 * NSEC_PER_SEC)), q, tick);
     });
 }
 
@@ -215,5 +247,8 @@ static void init_stretch(void) {
         dispatch_async(dispatch_get_main_queue(), ^{ installGesture(); });
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 3*NSEC_PER_SEC),
                        dispatch_get_main_queue(), ^{ installGesture(); });
+        // Растяжка кадра: периодически ставим Metal-слою contentsGravity=resize
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 1*NSEC_PER_SEC),
+                       dispatch_get_main_queue(), ^{ startLayerFixer(); });
     }
 }
