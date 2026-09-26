@@ -61,6 +61,8 @@ static void stretchMetalLayer(CALayer *l) {
         if (W <= 0 || H <= 0) return;
         CGFloat S = (W / H) / g_aspect;          // 19.5:9 / 4:3 = ~1.626
         if (S <= 1.002 || S > 4.0) return;
+        if (!l.affineTransform.a && !l.affineTransform.d)
+            fprintf(stderr, "[Stretch] stretch: layer=%.0fx%.0f S=%.4f\n", W, H, S);
         CGFloat cx = f.origin.x + W * 0.5f;
         CGFloat cy = f.origin.y + H * 0.5f;
         // растяжение относительно центра: T(-c) * Scale(S,1) * T(c)
