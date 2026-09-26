@@ -19,8 +19,6 @@ static void forceRereadBounds(void) {
         if ([cls respondsToSelector:will]) [cls performSelector:will];
         [[NSNotificationCenter defaultCenter]
             postNotificationName:UIDeviceOrientationDidChangeNotification object:nil];
-        [[NSNotificationCenter defaultCenter]
-            postNotificationName:UIDeviceOrientationWillChangeNotification object:nil];
     });
 }
 
