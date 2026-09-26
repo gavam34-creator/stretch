@@ -9,8 +9,16 @@
 #define RESIZE_OFFSET 0x032D3AC0
 #define BASE_VADDR    0x100000000
 
-// Целевое соотношение сторон. 4:3 = 1.333 — «квадратный» рендер.
-static double targetAspect = 4.0 / 3.0;
+// Целевое соотношение сторон — ШИРОКАЯ «растяжка», как на Android.
+// Нативный iPhone 14 Pro Max = 19.5:9 (~2.167). Чтобы обзор по горизонтали
+// стал ШИРЕ нативного, ставь значение БОЛЬШЕ 2.167:
+//     20:9 = 2.222
+//     21:9 = 2.333   <-- по умолчанию
+//     24:9 = 2.667   (ультра-широкий)
+//     32:9 = 3.556   (максимум, картинка сильно вытянута)
+#define TARGET_ASPECT  (7.0 / 3.0)   // 21:9
+
+static double targetAspect = TARGET_ASPECT;
 static BOOL stretchEnabled = YES;
 
 static void (*orig_ResizeViewport)(void *self, uint32_t sizeX, uint32_t sizeY);
@@ -20,6 +28,8 @@ static void hook_ResizeViewport(void *self, uint32_t sizeX, uint32_t sizeY) {
 
     if (stretchEnabled && sizeY > 0) {
         uint32_t newX = (uint32_t)(sizeY * targetAspect);
+        // округляем ширину к кратному 8 — некоторые движки требуют выравнивания
+        newX = (newX + 4) & ~7u;
         if (newX > 0 && newX != sizeX) {
             orig_ResizeViewport(self, newX, sizeY);
             return;
