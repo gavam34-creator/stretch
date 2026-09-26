@@ -127,21 +127,27 @@ static UIWindow *g_win = nil;
 
 @end
 
-// gesture: 2- и 3-пальцевый тап
+// gesture: 2- и 3-пальцевый тап (одиночный И двойной) — срабатывает с первого раза
 static void installGesture(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
         for (UIWindow *w in UIApplication.sharedApplication.windows) {
             if (!w.isKeyWindow) continue;
-            for (int n = 2; n <= 3; n++) {
+            // (fingers, taps): (2,1) (3,1) (2,2) (3,2) — ловим все варианты
+            int cfg[][2] = {{2,1},{3,1},{2,2},{3,2}};
+            for (int i = 0; i < 4; i++) {
+                int fingers = cfg[i][0], taps = cfg[i][1];
                 UITapGestureRecognizer *g =
                     [[UITapGestureRecognizer alloc] initWithTarget:[StretchMenu class]
                                                             action:@selector(toggleMenu:)];
-                g.numberOfTouchesRequired = n;
+                g.numberOfTouchesRequired = fingers;
+                g.numberOfTapsRequired = taps;
+                g.cancelsTouchesInView = NO;          // не блокируем игру
+                g.delaysTouchesBegan = NO;
                 [w addGestureRecognizer:g];
             }
             break;
         }
-        fprintf(stderr, "[Stretch] gesture installed (2/3-finger tap)\n");
+        fprintf(stderr, "[Stretch] gestures installed (2/3-finger tap, single+double)\n");
     });
 }
 
@@ -158,8 +164,9 @@ static void init_stretch(void) {
                        method_setImplementation(mnb, (IMP)hook_nativeBounds); }
             fprintf(stderr, "[Stretch] init aspect=%.3f\n", g_aspect);
         });
-        // gesture чуть позже, когда окно готово
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2*NSEC_PER_SEC),
+        // gesture: ставим и сразу, и позже (на случай смены окон)
+        dispatch_async(dispatch_get_main_queue(), ^{ installGesture(); });
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 3*NSEC_PER_SEC),
                        dispatch_get_main_queue(), ^{ installGesture(); });
     }
 }
