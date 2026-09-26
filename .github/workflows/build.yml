@@ -15,27 +15,37 @@ jobs:
       - name: Show files
         run: ls -la
 
-      - name: Select a working Xcode
+      - name: Select Xcode
         run: |
-          echo "=== Installed Xcodes ==="
-          ls -1 /Applications | grep -i xcode || true
-          # по умолчанию используем текущий, но если есть 15.x — берём его для стабильности Dobby
           if [ -d "/Applications/Xcode_15.4.app" ]; then
             sudo xcode-select -s /Applications/Xcode_15.4.app
-            echo "Selected Xcode 15.4"
           fi
           xcodebuild -version
           xcrun --sdk iphoneos --show-sdk-path
 
+      - name: Install ldid
+        run: |
+          brew install ldid || true
+
       - name: Compile Stretch.dylib
         run: |
-          xcrun --sdk iphoneos clang -arch arm64 \
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          xcrun --sdk iphoneos clang \
+            -arch arm64 \
+            -arch arm64e \
             -dynamiclib \
+            -fobjc-arc \
             -framework UIKit -framework Foundation -framework CoreGraphics -framework QuartzCore \
-            -isysroot $(xcrun --sdk iphoneos --show-sdk-path) \
+            -isysroot "$SDK" \
             -miphoneos-version-min=14.0 \
             -Wl,-install_name,@executable_path/Frameworks/Stretch.dylib \
+            -Wl,-undefined,dynamic_lookup \
             -o Stretch.dylib Tweak.m
+
+      - name: Sign dylib (ldid)
+        run: |
+          ldid -S Stretch.dylib
+          ldid -e Stretch.dylib | head -20 || true
 
       - name: Verify dylib
         run: |
@@ -45,8 +55,8 @@ jobs:
 
       - name: Package
         run: |
-          mkdir -p Stretch-package
-          cp Stretch.dylib Stretch-package/
+          mkdir -p Stretch-package/Frameworks
+          cp Stretch.dylib Stretch-package/Frameworks/
           zip -r Stretch-dylib.zip Stretch.dylib
 
       - name: Upload dylib
