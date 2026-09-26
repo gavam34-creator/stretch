@@ -91,7 +91,7 @@ static UIWindow *g_win = nil;
             [box addSubview:b];
             y += 44;
         }
-        UILabel *hint = [self mkLabel:@"2/3-finger tap = toggle" size:11];
+        UILabel *hint = [self mkLabel:@"3-finger double-tap = toggle" size:11];
         hint.textColor = [UIColor colorWithWhite:1 alpha:0.5];
         hint.frame = CGRectMake(0,400,250,20);
 
@@ -127,27 +127,22 @@ static UIWindow *g_win = nil;
 
 @end
 
-// gesture: 2- и 3-пальцевый тап (одиночный И двойной) — срабатывает с первого раза
+// gesture: ТОЛЬКО 3-пальцевый ДВОЙНОЙ тап — чтобы меню случайно не открывалось в бою
 static void installGesture(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
         for (UIWindow *w in UIApplication.sharedApplication.windows) {
             if (!w.isKeyWindow) continue;
-            // (fingers, taps): (2,1) (3,1) (2,2) (3,2) — ловим все варианты
-            int cfg[][2] = {{2,1},{3,1},{2,2},{3,2}};
-            for (int i = 0; i < 4; i++) {
-                int fingers = cfg[i][0], taps = cfg[i][1];
-                UITapGestureRecognizer *g =
-                    [[UITapGestureRecognizer alloc] initWithTarget:[StretchMenu class]
-                                                            action:@selector(toggleMenu:)];
-                g.numberOfTouchesRequired = fingers;
-                g.numberOfTapsRequired = taps;
-                g.cancelsTouchesInView = NO;          // не блокируем игру
-                g.delaysTouchesBegan = NO;
-                [w addGestureRecognizer:g];
-            }
+            UITapGestureRecognizer *g =
+                [[UITapGestureRecognizer alloc] initWithTarget:[StretchMenu class]
+                                                        action:@selector(toggleMenu:)];
+            g.numberOfTouchesRequired = 3;   // три пальца
+            g.numberOfTapsRequired   = 2;    // два раза
+            g.cancelsTouchesInView   = NO;   // не блокируем игру
+            g.delaysTouchesBegan     = NO;
+            [w addGestureRecognizer:g];
             break;
         }
-        fprintf(stderr, "[Stretch] gestures installed (2/3-finger tap, single+double)\n");
+        fprintf(stderr, "[Stretch] gesture: 3-finger DOUBLE tap\n");
     });
 }
 
