@@ -27,30 +27,15 @@ jobs:
           xcodebuild -version
           xcrun --sdk iphoneos --show-sdk-path
 
-      - name: Build Dobby (static lib, iphoneos arm64)
-        run: |
-          git clone --depth 1 https://github.com/jmpews/Dobby.git
-          cd Dobby && mkdir -p build && cd build
-          cmake .. -DCMAKE_OSX_SYSROOT=iphoneos -DCMAKE_OSX_ARCHITECTURES=arm64 \
-            -DCMAKE_OSX_DEPLOYMENT_TARGET=14.0 \
-            -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_CXX_STANDARD=14 \
-            -DBUILD_SHARED_LIBS=OFF -DDOBBY_BUILD_EXAMPLES=OFF -DDOBBY_BUILD_TESTS=OFF
-          cmake --build . --config Release -j4
-
       - name: Compile Stretch.dylib
         run: |
-          DOBBY_LIB=$(find ./Dobby -name "libdobby.a" | head -1)
-          DOBBY_INC=./Dobby/include
-          test -f "$DOBBY_LIB" || { echo "libdobby.a missing"; exit 1; }
-          test -f "$DOBBY_INC/dobby.h" || { echo "dobby.h missing"; exit 1; }
           xcrun --sdk iphoneos clang -arch arm64 \
             -dynamiclib \
             -framework UIKit -framework Foundation -framework CoreGraphics \
             -isysroot $(xcrun --sdk iphoneos --show-sdk-path) \
             -miphoneos-version-min=14.0 \
-            -I"$DOBBY_INC" \
             -Wl,-install_name,@executable_path/Frameworks/Stretch.dylib \
-            -o Stretch.dylib Tweak.m "$DOBBY_LIB" -lc++
+            -o Stretch.dylib Tweak.m
 
       - name: Verify dylib
         run: |
