@@ -15,6 +15,17 @@ jobs:
       - name: List files
         run: ls -la
 
+      - name: Extract Dobby
+        run: |
+          if [ -f "dobby-iphoneos-all.tar.gz" ]; then
+            tar -xzf dobby-iphoneos-all.tar.gz
+            rm dobby-iphoneos-all.tar.gz
+          fi
+          echo "=== Files after extraction ==="
+          ls -la
+          echo "=== Looking for .a and .h files ==="
+          find . -name "*.a" -o -name "*.h" | head -50
+
       - name: Compile dylib with clang
         run: |
           xcrun --sdk iphoneos clang -arch arm64 \
@@ -24,8 +35,10 @@ jobs:
             -framework CoreGraphics \
             -isysroot $(xcrun --sdk iphoneos --show-sdk-path) \
             -miphoneos-version-min=14.0 \
+            -I. \
+            -Iinclude \
             -install_name @executable_path/Frameworks/Stretch.dylib \
-            -o Stretch.dylib Tweak.m
+            -o Stretch.dylib Tweak.m libdobby.a
 
       - name: Verify dylib
         run: |
