@@ -12,26 +12,42 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: List files
+      - name: Select Xcode 15.4
+        uses: maxim-lobanov/setup-xcode-action@v1
+        with:
+          xcode-version: '15.4'
+
+      - name: Show files
         run: ls -la
 
-      - name: Extract Dobby
+      - name: Build Dobby (static lib, iphoneos arm64)
         run: |
-          if [ -f "dobby-iphoneos-all.tar.gz" ]; then
-            tar -xzf dobby-iphoneos-all.tar.gz
-            rm dobby-iphoneos-all.tar.gz
-          fi
-          echo "=== Files after extraction ==="
-          ls -la
-          echo "=== Looking for .a and .h files ==="
-          find . -name "*.a" -o -name "*.h" | head -50
+          git clone --depth 1 https://github.com/jmpews/Dobby.git
+          cd Dobby
+          mkdir -p build
+          cd build
+          cmake .. \
+            -DCMAKE_OSX_SYSROOT=iphoneos \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=14.0 \
+            -DCMAKE_C_COMPILER=clang \
+            -DCMAKE_CXX_COMPILER=clang++ \
+            -DCMAKE_CXX_STANDARD=14 \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DDOBBY_BUILD_EXAMPLES=OFF \
+            -DDOBBY_BUILD_TESTS=OFF
+          cmake --build . --config Release -j4
+          echo "=== Dobby artifacts ==="
+          find . -name "*.a" -o -name "dobby.h" | head -20
 
-      - name: Compile dylib with clang
+      - name: Compile Stretch.dylib
         run: |
-          DOBBY_LIB=$(find . -name "libdobby.a" | head -1)
-          DOBBY_INC=$(find . -name "dobby.h" | head -1 | xargs dirname)
+          DOBBY_LIB=$(find ./Dobby -name "libdobby.a" | head -1)
+          DOBBY_INC=./Dobby/include
           echo "Dobby lib: $DOBBY_LIB"
-          echo "Dobby include: $DOBBY_INC"
+          echo "Dobby inc: $DOBBY_INC"
+          test -f "$DOBBY_LIB" || { echo "libdobby.a NOT BUILT"; exit 1; }
+          test -f "$DOBBY_INC/dobby.h" || { echo "dobby.h MISSING"; exit 1; }
           xcrun --sdk iphoneos clang -arch arm64 \
             -dynamiclib \
             -framework UIKit \
@@ -40,16 +56,25 @@ jobs:
             -isysroot $(xcrun --sdk iphoneos --show-sdk-path) \
             -miphoneos-version-min=14.0 \
             -I"$DOBBY_INC" \
-            -install_name @executable_path/Frameworks/Stretch.dylib \
+            -Wl,-install_name,@executable_path/Frameworks/Stretch.dylib \
             -o Stretch.dylib Tweak.m "$DOBBY_LIB"
 
       - name: Verify dylib
         run: |
           ls -la Stretch.dylib
           file Stretch.dylib
+          xcrun lipo -info Stretch.dylib
+
+      - name: Package
+        run: |
+          mkdir -p Stretch-package
+          cp Stretch.dylib Stretch-package/
+          zip -r Stretch-dylib.zip Stretch.dylib
 
       - name: Upload dylib
         uses: actions/upload-artifact@v4
         with:
           name: Stretch-dylib
-          path: Stretch.dylib
+          path: |
+            Stretch.dylib
+            Stretch-dylib.zip
