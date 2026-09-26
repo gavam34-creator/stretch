@@ -34,10 +34,13 @@ static CGRect hook_nativeBounds(id s, SEL c) {
 + (void)show;
 + (void)hide;
 + (void)pick:(id)sender;
++ (void)sliderChanged:(id)sender;
 + (void)toggleMenu:(id)sender;
 @end
 
 static UIWindow *g_win = nil;
+static UILabel *g_valLabel = nil;
+static UISlider *g_slider = nil;
 
 @implementation StretchMenu
 
@@ -46,6 +49,25 @@ static UIWindow *g_win = nil;
     l.text = t; l.font = [UIFont monospacedSystemFontOfSize:s weight:UIFontWeightBold];
     l.textColor = [UIColor whiteColor]; l.textAlignment = NSTextAlignmentCenter;
     return l;
+}
+
++ (NSString *)fmtAspect:(double)a {
+    if (a <= 0.01) return @"Native (off)";
+    return [NSString stringWithFormat:@"%.3f  (%.1f:1)%@", a, a,
+            (a <= 2.20 ? @"  [bars]" : @"  [no bars]")];
+}
+
++ (void)updateLabel {
+    if (g_valLabel) g_valLabel.text = [self fmtAspect:g_aspect];
+}
+
++ (void)sliderChanged:(id)sender {
+    UISlider *s = (UISlider *)sender;
+    g_aspect = s.value;
+    [self updateLabel];
+    // мягко обновляем без пересоздания окна
+    [self hide];
+    [self show];
 }
 
 + (UIButton *)mkBtn:(NSString *)t aspect:(double)a {
@@ -79,36 +101,52 @@ static UIWindow *g_win = nil;
         box.bounds = CGRectMake(0,0,250,430);
         box.center = CGPointMake(CGRectGetMidX(v.bounds), CGRectGetMidY(v.bounds));
 
-        UILabel *title = [self mkLabel:@"STRETCH ASPECT" size:17];
-        title.frame = CGRectMake(0,10,250,26);
+        UILabel *title = [self mkLabel:@"STRETCH  (drag = sides)" size:16];
+        title.frame = CGRectMake(0,10,250,24);
 
-        NSArray *opts = @[@"Native  19.5:9  (off)",@"4:3   1.333  [bars]",
-                          @"16:9  1.778  [bars]",@"20:9  2.222  [no bars]",
-                          @"21:9  2.333  [no bars]",@"24:9  2.667  [no bars]",
-                          @"28:9  3.111  [no bars]",@"32:9  3.556  [no bars]"];
-        double asp[] = {0.0, 4.0/3.0, 16.0/9.0, 20.0/9.0, 21.0/9.0, 24.0/9.0, 28.0/9.0, 32.0/9.0};
+        // ---- ползунок ширины (высота держится, тянешь вбок) ----
+        g_valLabel = [self mkLabel:[self fmtAspect:g_aspect] size:15];
+        g_valLabel.frame = CGRectMake(0,40,250,22);
 
-        CGFloat y = 42;
+        g_slider = [UISlider new];
+        g_slider.minimumValue = 1.0;      // узко (полосы)
+        g_slider.maximumValue = 3.5;      // ультра-широко
+        g_slider.value = (float)MAX(1.0, MIN(3.5, g_aspect));
+        g_slider.frame = CGRectMake(20,68,210,32);
+        g_slider.minimumTrackTintColor = [UIColor systemGreenColor];
+        g_slider.maximumTrackTintColor = [UIColor colorWithWhite:1 alpha:0.2];
+        [g_slider addTarget:self action:@selector(sliderChanged:)
+           forControlEvents:UIControlEventValueChanged];
+
+        UILabel *hintW = [self mkLabel:@"<- narrow        wide ->" size:10];
+        hintW.textColor = [UIColor colorWithWhite:1 alpha:0.5];
+        hintW.frame = CGRectMake(0,98,250,16);
+
+        // ---- быстрые пресеты ----
+        NSArray *opts = @[@"Native 19.5:9 (off)",@"4:3",@"16:9",@"20:9",@"21:9",@"24:9",@"32:9"];
+        double asp[] = {0.0, 4.0/3.0, 16.0/9.0, 20.0/9.0, 21.0/9.0, 24.0/9.0, 32.0/9.0};
+        CGFloat y = 122;
         for (NSUInteger i = 0; i < opts.count; i++) {
             UIButton *b = [self mkBtn:opts[i] aspect:asp[i]];
-            b.center = CGPointMake(125, y + 19);
+            b.center = CGPointMake(125, y + 18);
             [box addSubview:b];
-            y += 44;
+            y += 42;
         }
-        UILabel *hint = [self mkLabel:@"3-finger double-tap = toggle" size:11];
-        hint.textColor = [UIColor colorWithWhite:1 alpha:0.5];
-        hint.frame = CGRectMake(0,400,250,20);
 
-        [box addSubview:title]; [box addSubview:hint];
+        UILabel *hint = [self mkLabel:@"3-finger double-tap = close" size:11];
+        hint.textColor = [UIColor colorWithWhite:1 alpha:0.5];
+        hint.frame = CGRectMake(0,404,250,20);
+
+        [box addSubview:title]; [box addSubview:g_valLabel];
+        [box addSubview:g_slider]; [box addSubview:hintW]; [box addSubview:hint];
         [v addSubview:box];
-        // тап вне меню — закрыть
         UITapGestureRecognizer *close = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(hide)];
         [v addGestureRecognizer:close];
 
         g_win.rootViewController = [UIViewController new];
         g_win.rootViewController.view = v;
         [g_win makeKeyAndVisible];
-        fprintf(stderr, "[Stretch] menu shown\n");
+        fprintf(stderr, "[Stretch] menu shown, aspect=%.3f\n", g_aspect);
     });
 }
 
@@ -116,14 +154,14 @@ static UIWindow *g_win = nil;
     dispatch_async(dispatch_get_main_queue(), ^{
         if (!g_win) return;
         g_win.hidden = YES; g_win.rootViewController = nil; g_win = nil;
+        g_slider = nil; g_valLabel = nil;
         fprintf(stderr, "[Stretch] menu hidden, aspect=%.3f\n", g_aspect);
     });
 }
 
 + (void)pick:(id)sender {
     UIButton *b = (UIButton *)sender;
-    double a = b.accessibilityIdentifier.doubleValue;
-    g_aspect = a;
+    g_aspect = b.accessibilityIdentifier.doubleValue;
     [self hide];
 }
 
