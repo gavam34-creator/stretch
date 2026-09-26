@@ -22,6 +22,9 @@
 
 static double g_aspect = 1440.0 / 1080.0;  // 4:3 = 1.3333
 static volatile int g_spoofOn = 0;          // вкл. через 7 сек
+// ВАЖНО: применение affineTransform к CAMetalLayer роняет игру
+// (падает внутри Metal/UE4 RHI). По умолчанию ВЫКЛЮЧЕНО — только диагностика.
+static volatile int g_applyStretch = 0;
 
 static CGRect (*orig_bounds)(id, SEL)       = NULL;
 static CGRect (*orig_nativeBounds)(id, SEL) = NULL;
@@ -64,14 +67,20 @@ static void stretchMetalLayer(CALayer *l) {
         CGFloat cx = f.origin.x + W * 0.5f;
         CGFloat cy = f.origin.y + H * 0.5f;
         if (!isfinite(cx) || !isfinite(cy)) return;
+        // диагностика без мутации слоя (не чаще 1 раза в сек)
+        static NSTimeInterval lastLog = 0;
+        NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
+        if (now - lastLog > 1.0) {
+            lastLog = now;
+            fprintf(stderr, "[Stretch] layer=%.0fx%.0f S=%.4f apply=%d\n",
+                    W, H, S, g_applyStretch);
+        }
+        if (!g_applyStretch) return;            // не трогаем слой -> не крашится
         // растяжение относительно центра: T(-c) * Scale(S,1) * T(c)
         CGAffineTransform t =
             CGAffineTransformConcat(CGAffineTransformMakeTranslation(-cx, -cy),
               CGAffineTransformConcat(CGAffineTransformMakeScale(S, 1.0),
                                       CGAffineTransformMakeTranslation(cx, cy)));
-        if (!CGAffineTransformIsIdentity(l.affineTransform) && !l.affineTransform.a &&
-            !l.affineTransform.d)
-            fprintf(stderr, "[Stretch] stretch: layer=%.0fx%.0f S=%.4f\n", W, H, S);
         if (!CGAffineTransformEqualToTransform(l.affineTransform, t))
             l.affineTransform = t;
     } @catch (id e) {}
