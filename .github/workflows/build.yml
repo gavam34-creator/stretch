@@ -28,6 +28,10 @@ jobs:
 
       - name: Compile dylib with clang
         run: |
+          DOBBY_LIB=$(find . -name "libdobby.a" | head -1)
+          DOBBY_INC=$(find . -name "dobby.h" | head -1 | xargs dirname)
+          echo "Dobby lib: $DOBBY_LIB"
+          echo "Dobby include: $DOBBY_INC"
           xcrun --sdk iphoneos clang -arch arm64 \
             -dynamiclib \
             -framework UIKit \
@@ -35,10 +39,9 @@ jobs:
             -framework CoreGraphics \
             -isysroot $(xcrun --sdk iphoneos --show-sdk-path) \
             -miphoneos-version-min=14.0 \
-            -I. \
-            -Iinclude \
+            -I"$DOBBY_INC" \
             -install_name @executable_path/Frameworks/Stretch.dylib \
-            -o Stretch.dylib Tweak.m libdobby.a
+            -o Stretch.dylib Tweak.m "$DOBBY_LIB"
 
       - name: Verify dylib
         run: |
