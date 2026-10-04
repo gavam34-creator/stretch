@@ -52,11 +52,13 @@ jobs:
           ls -la Stretch.dylib
           file Stretch.dylib
           xcrun lipo -info Stretch.dylib
+          echo "--- install_name ---"
+          otool -D Stretch.dylib
+          echo "--- dependencies ---"
+          otool -L Stretch.dylib
 
       - name: Package
         run: |
-          mkdir -p Stretch-package/Frameworks
-          cp Stretch.dylib Stretch-package/Frameworks/
           zip -r Stretch-dylib.zip Stretch.dylib
 
       - name: Upload dylib
