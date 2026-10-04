@@ -4,41 +4,30 @@
 #import <mach/mach.h>
 #import <mach/vm_map.h>
 #import <stdio.h>
+#import <math.h>
+#import <string.h>
 #import <mach-o/loader.h>
-#include <math.h>
-#include <string.h>
+
+#import "GlobalOffsets.h"
 
 extern const struct mach_header *_dyld_get_image_header(int32_t index);
 extern int32_t _dyld_image_count(void);
 extern const char *_dyld_get_image_name(int32_t index);
 
 // =============================================================================
-//  WORKUP STRETCH v6 — FINAL
+//  WORKUP STRETCH v8 — GLOBAL BUILD
+//  A) UIScreen.bounds -> выбранный aspect
+//  B) UEngine + UENG_ASPECT_OFF = 1
+//  C) contentsGravity = Resize на Metal-слое
 //
-//  A) UIScreen.bounds -> 4:3 (origin НЕ сдвигаем, nativeBounds НЕ трогаем)
-//  B) UEngine+0x7C = 1 (MaintainXFOV) — через vm_read_overwrite/vm_write
-//  C) contentsGravity=Resize на главном слое — KVC, БЕЗ глобального хука
-//
-//  ФИКСЫ v8:
-//   1. Убран гейт по UEngine::ViewportClient из read/write. Он ломал всё:
-//      на 7-й секунде вьюпорт ещё NULL -> и чтение, и запись молча
-//      блокировались, отсюда был "read: -1" при живом движке.
-//   2. Гейт заменён на vtable-проверку (первые 8 байт != NULL).
-//   3. Окно ретрая 15с -> 60с, стартует ВСЕГДА, независимо от ok.
-//   4. diagnoseEngine(): пошаговая печать, локализует обрыв до шага.
-//   5. autoScanAspectFlag(): если +0x7C не 0/1/2 - скан байта рядом.
-//   6. Кнопка DIAG в меню.
+//  ВАЖНО: офсеты под Global в GlobalOffsets.h. Если офсет = 0x0,
+//  твик его не трогает и пишет в консоль, что не настроен.
 // =============================================================================
-
-#define GENGINE_OFF  0xA8A8A0UL
-#define UENG_ASPECT  0x7C
-#define UENG_VPCL    0x58
 
 static double        g_aspect    = 4.0 / 3.0;
 static volatile int  g_spoofOn   = 0;
 
 static int           g_engineWant = 1;
-static int           g_engineLast = -2;
 static uintptr_t     g_base       = 0;
 static int           g_engineOverrides = 0;
 
@@ -47,7 +36,7 @@ static UILabel  *g_status   = nil;
 static UILabel  *g_engLabel = nil;
 
 // =============================================================================
-//  SAFE MEMORY — vm_read_overwrite / vm_write
+//  SAFE MEMORY
 // =============================================================================
 static BOOL safeRead8(uintptr_t addr, uint8_t *out) {
     vm_size_t sz = 1;
@@ -77,6 +66,14 @@ static BOOL safeWrite8(uintptr_t addr, uint8_t val) {
     return (kr == KERN_SUCCESS);
 }
 
+static BOOL safeWritePtr(uintptr_t addr, void *val) {
+    kern_return_t kr = vm_write(mach_task_self(),
+                                 (vm_address_t)addr,
+                                 (vm_address_t)&val,
+                                 sizeof(void *));
+    return (kr == KERN_SUCCESS);
+}
+
 // =============================================================================
 //  A) ХУК bounds
 // =============================================================================
@@ -94,7 +91,7 @@ static CGRect spoofBounds(CGRect r) {
 }
 
 static CGRect hook_bounds(id s, SEL c) {
-    if (!orig_bounds) return CGRectZero;        // ЗАЩИТА
+    if (!orig_bounds) return CGRectZero;
     CGRect real = orig_bounds(s, c);
     return spoofBounds(real);
 }
@@ -109,31 +106,27 @@ static void forceRereadBounds(void) {
 }
 
 // =============================================================================
-//  B) ДВИЖКОВЫЙ ФЛАГ — безопасно
+//  B) ПОИСК БАЗЫ + UENGINE
 // =============================================================================
 static uintptr_t findGameBase(void) {
     for (int32_t i = 0; i < _dyld_image_count(); i++) {
         const char *n = _dyld_get_image_name(i);
         if (!n) continue;
-        if (strstr(n, "ShadowTrackerExtra")) {
+        if (strstr(n, GLOBAL_IMAGE_NAME)) {
             return (uintptr_t)_dyld_get_image_header(i);
         }
     }
-    return (uintptr_t)_dyld_get_image_header(0);
+    return 0;
 }
 
 static void *genginePtrSafe(void) {
     if (!g_base) g_base = findGameBase();
     if (!g_base) return NULL;
     void *e = NULL;
-    if (!safeReadPtr(g_base + GENGINE_OFF, &e)) return NULL;
+    if (!safeReadPtr(g_base + G_GENGINE_OFF, &e)) return NULL;
     return e;
 }
 
-// --- признак "это UObject" -------------------------------------------------
-// Проверять одно выравнивание бессмысленно: указатель бывает выровнен и при
-// этом мусором. Настоящий признак - первые 8 байт это не-NULL vtable.
-// ВАЖНО: vtable тоже читаем через vm_read, прямого разыменования тут нет.
 static int plausibleEngine(void *e) {
     if (!e) return 0;
     uintptr_t a = (uintptr_t)e;
@@ -146,159 +139,59 @@ static int plausibleEngine(void *e) {
     return 1;
 }
 
-// Если по +0x7C приходит не 0/1/2 - ищем байт-кандидат рядом.
-// Эвристика: значение 0..2 И в пределах +-16 байт есть непустой 8-байтный
-// указатель (соседнее свойство-указатель).
-static long autoScanAspectFlag(void) {
-    void *e = genginePtrSafe();
-    if (!e) { fprintf(stderr, "[Stretch] scan: no engine\n"); return -1; }
-    uintptr_t p = (uintptr_t)e;
-    long found = -1;
-    int n = 0;
-    for (uintptr_t off = 0x50; off <= 0xB0; off++) {
-        uint8_t v = 0;
-        if (!safeRead8(p + off, &v)) continue;
-        if (v > 2) continue;
-        int near = 0;
-        for (int d = 8; d <= 16; d += 8) {
-            void *nb = NULL;
-            if (safeReadPtr(p + off + d, &nb) && nb && (uintptr_t)nb > 0x1000) near = 1;
-            if (safeReadPtr(p + off - d, &nb) && nb && (uintptr_t)nb > 0x1000) near = 1;
-        }
-        if (!near) continue;
-        fprintf(stderr, "[Stretch] scan: +0x%02lX = %u (рядом указатель)\n",
-                (unsigned long)off, (unsigned)v);
-        if (found < 0) found = (long)off;
-        n++;
-    }
-    fprintf(stderr, "[Stretch] scan done: %d кандидат(ов)\n", n);
-    return found;
-}
-
-// Пошаговая диагностика: показывает РОВНО на каком шаге обрыв.
-static void diagnoseEngine(void) {
-    fprintf(stderr, "[Stretch] ===== DIAG =====\n");
-    if (!g_base) g_base = findGameBase();
-    fprintf(stderr, "[Stretch] DIAG images=%d base=%p slot=%p\n",
-            (int)_dyld_image_count(), (void *)g_base, (void *)(g_base + GENGINE_OFF));
-    if (!g_base) { fprintf(stderr, "[Stretch] DIAG FAIL: base не найден\n"); return; }
-
-    void *e = NULL;
-    vm_size_t sz = sizeof(void *);
-    kern_return_t kr = vm_read_overwrite(mach_task_self(),
-                                         (vm_address_t)(g_base + GENGINE_OFF),
-                                         sizeof(void *), (vm_address_t)&e, &sz);
-    fprintf(stderr, "[Stretch] DIAG slot kr=%d engine=%p\n", (int)kr, e);
-    if (kr != KERN_SUCCESS) {
-        fprintf(stderr, "[Stretch] DIAG FAIL: kr=%d (1=PROTECTION, 14=INVALID)\n", (int)kr);
-        return;
-    }
-    if (!e) {
-        fprintf(stderr, "[Stretch] DIAG FAIL: GEngine==NULL -> движок не поднят\n");
-        return;
-    }
-    if (!plausibleEngine(e)) {
-        fprintf(stderr, "[Stretch] DIAG FAIL: %p не похож на UObject\n", e);
-        return;
-    }
-
-    void *vt = NULL, *vpc = NULL;
-    uint8_t flag = 0xFF;
-    safeReadPtr((uintptr_t)e, &vt);
-    safeReadPtr((uintptr_t)e + UENG_VPCL, &vpc);
-    int fok = safeRead8((uintptr_t)e + UENG_ASPECT, &flag);
-    fprintf(stderr, "[Stretch] DIAG vtable=%p vpc@+%d=%p flag@+%d=%s%u\n",
-            vt, UENG_VPCL, vpc, UENG_ASPECT, fok ? "" : "НЕ ЧИТАЕТСЯ, ",
-            (unsigned)(fok ? flag : 0));
-
-    fprintf(stderr, "[Stretch] DIAG dump:");
-    for (int off = 0x50; off <= 0xB0; off += 8) {
-        void *q = NULL;
-        if (safeReadPtr((uintptr_t)e + off, &q)) fprintf(stderr, " %02X=%p", off, q);
-        else                                            fprintf(stderr, " %02X=??", off);
-    }
-    fprintf(stderr, "\n");
-    if (fok && flag <= 2) {
-        fprintf(stderr, "[Stretch] DIAG OK: +%d похож на enum\n", UENG_ASPECT);
-    } else {
-        fprintf(stderr, "[Stretch] DIAG WARN: +%d не 0/1/2, скан\n", UENG_ASPECT);
-        autoScanAspectFlag();
-    }
-    fprintf(stderr, "[Stretch] ===== /DIAG =====\n");
-}
-
 static int readEngineAspect(void) {
     void *e = genginePtrSafe();
     if (!plausibleEngine(e)) return -1;
     uint8_t v = 0;
-    if (!safeRead8((uintptr_t)e + UENG_ASPECT, &v)) return -1;
+    if (!safeRead8((uintptr_t)e + UENG_ASPECT_OFF, &v)) return -1;
     return (int)v;
 }
 
 static int writeEngineAspect(int v) {
     if (v < 0 || v > 2) return 0;
     void *e = genginePtrSafe();
-    // Гейт ТОЛЬКО на vtable. Раньше здесь стояла проверка ViewportClient!=NULL,
-    // и это ломало всё: вьюпорт на 7-й секунде ещё NULL, и обе операции
-    // молча блокировались.
     if (!plausibleEngine(e)) return 0;
-    if (!safeWrite8((uintptr_t)e + UENG_ASPECT, (uint8_t)v)) return 0;
-    uint8_t verify = 0;
-    if (safeRead8((uintptr_t)e + UENG_ASPECT, &verify)) g_engineLast = verify;
+    if (!safeWrite8((uintptr_t)e + UENG_ASPECT_OFF, (uint8_t)v)) return 0;
     return 1;
 }
 
-static void engineAspectRetry(int idx) {
-    if (idx > 40) {                       // 40 * 1.5c = 60 секунд
-        fprintf(stderr, "[Stretch] engine final: want=%d read=%d overrides=%d\n",
-                g_engineWant, readEngineAspect(), g_engineOverrides);
+static void diagnoseEngine(void) {
+    fprintf(stderr, "[Stretch] ===== DIAG =====\n");
+    if (!g_base) g_base = findGameBase();
+    fprintf(stderr, "[Stretch] DIAG base=%p slot=%p\n",
+            (void *)g_base, (void *)(g_base + G_GENGINE_OFF));
+    if (!g_base) { fprintf(stderr, "[Stretch] DIAG FAIL: base не найден\n"); return; }
+
+    void *e = NULL;
+    vm_size_t sz = sizeof(void *);
+    kern_return_t kr = vm_read_overwrite(mach_task_self(),
+                                         (vm_address_t)(g_base + G_GENGINE_OFF),
+                                         sizeof(void *), (vm_address_t)&e, &sz);
+    fprintf(stderr, "[Stretch] DIAG slot kr=%d engine=%p\n", (int)kr, e);
+    if (kr != KERN_SUCCESS || !e || !plausibleEngine(e)) {
+        fprintf(stderr, "[Stretch] DIAG FAIL: движок не найден\n");
         return;
     }
-    if (g_engineWant < 0) return;
+    void *vt = NULL, *vpc = NULL;
+    uint8_t flag = 0xFF;
+    safeReadPtr((uintptr_t)e, &vt);
+    safeReadPtr((uintptr_t)e + UENG_VPCL_OFF, &vpc);
+    int fok = safeRead8((uintptr_t)e + UENG_ASPECT_OFF, &flag);
+    fprintf(stderr, "[Stretch] DIAG vtable=%p vpc=%p flag ok=%d val=%u\n",
+            vt, vpc, fok, (unsigned)(fok ? flag : 0));
 
-    int before = readEngineAspect();
-    int ok = writeEngineAspect(g_engineWant);
-    int after = readEngineAspect();
-    if (ok && after != g_engineWant) g_engineOverrides++;
-
-    if (idx <= 2 || (idx % 10) == 0 || ok == 0) {
-        fprintf(stderr, "[Stretch] engine try#%d want=%d ok=%d before=%d after=%d\n",
-                idx, g_engineWant, ok, before, after);
+    fprintf(stderr, "[Stretch] DIAG dump:");
+    for (int off = 0x50; off <= 0xB0; off += 8) {
+        void *q = NULL;
+        if (safeReadPtr((uintptr_t)e + off, &q)) fprintf(stderr, " %02X=%p", off, q);
+        else                                     fprintf(stderr, " %02X=??", off);
     }
-    if (idx == 4 || idx == 20 || idx == 40) diagnoseEngine();
-
-    if (g_engineOverrides >= 3) {
-        fprintf(stderr, "[Stretch] engine retry STOP: игра перебивает (overrides=%d)\n",
-                g_engineOverrides);
-        return;
-    }
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{ engineAspectRetry(idx + 1); });
-}
-
-static void engineAspectSet(int v) {
-    g_engineWant = v;
-    g_engineOverrides = 0;
-    if (v < 0) {
-        if (g_engLabel) g_engLabel.text = @"ENGINE: native";
-        return;
-    }
-    if (!findGameBase()) return;
-    int ok = writeEngineAspect(v);
-    fprintf(stderr, "[Stretch] engine set want=%d ok=%d read=%d\n",
-            v, ok, readEngineAspect());
-    // Ретай запускаем ВСЕГДА: если на 7-й секунде GEngine ещё NULL или объект
-    // не прошёл гейт, движок поднимается на 15-20-й секунде.
-    engineAspectRetry(1);
-    if (!ok) diagnoseEngine();
-    if (g_engLabel) {
-        g_engLabel.text = [NSString stringWithFormat:@"ENGINE: %d (read %d)",
-                                                       v, readEngineAspect()];
-    }
+    fprintf(stderr, "\n");
+    fprintf(stderr, "[Stretch] ===== /DIAG =====\n");
 }
 
 // =============================================================================
-//  C) FORCE GRAVITY — KVC, БЕЗ ГЛОБАЛЬНОГО ХУКА
+//  C) GRAVITY
 // =============================================================================
 static void forceMainLayerGravityOnce(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -308,13 +201,10 @@ static void forceMainLayerGravityOnce(void) {
                 if (win.isKeyWindow && (id)win != (id)g_win) { w = win; break; }
             }
             if (!w || !w.layer) return;
-
             Class metalCls = NSClassFromString(@"CAMetalLayer");
             if (!metalCls) return;
-
             NSArray *subs = w.layer.sublayers;
             if (!subs) return;
-
             int hits = 0;
             for (CALayer *l in subs) {
                 if ([l isKindOfClass:metalCls]) {
@@ -329,10 +219,7 @@ static void forceMainLayerGravityOnce(void) {
                 }
             }
             fprintf(stderr, "[Stretch] gravity set on %d metal layer(s)\n", hits);
-        } @catch (id e) {
-            fprintf(stderr, "[Stretch] force gravity fail: %s\n",
-                    [[e description] UTF8String]);
-        }
+        } @catch (id e) {}
     });
 }
 
@@ -341,12 +228,8 @@ static void forceMainLayerGravityOnce(void) {
 // =============================================================================
 @interface StretchMenu : NSObject
 + (void)show; + (void)hide; + (void)toggle:(id)s;
-+ (void)modeA:(id)s;
-+ (void)modeAB:(id)s;
-+ (void)modeABC:(id)s;
-+ (void)engPick:(id)s;
-+ (void)aspPick:(id)s;
-+ (void)diag:(id)s;
++ (void)modeA:(id)s; + (void)modeAB:(id)s; + (void)modeABC:(id)s;
++ (void)engPick:(id)s; + (void)aspPick:(id)s; + (void)diag:(id)s;
 @end
 
 @implementation StretchMenu
@@ -393,36 +276,41 @@ static double safeDoubleFromSender(id sender) {
 
 + (void)modeA:(id)s {
     g_spoofOn = 1;
-    engineAspectSet(-1);
+    writeEngineAspect(-1);
     forceRereadBounds();
     if (g_status) g_status.text = @"MODE: A (bounds only)";
-    fprintf(stderr, "[Stretch] MODE A\n");
     [self hide];
 }
 
 + (void)modeAB:(id)s {
     g_spoofOn = 1;
-    engineAspectSet(1);
+    writeEngineAspect(1);
     forceRereadBounds();
     if (g_status) g_status.text = @"MODE: A+B (bounds + XFOV)";
-    fprintf(stderr, "[Stretch] MODE A+B\n");
     [self hide];
 }
 
 + (void)modeABC:(id)s {
     g_spoofOn = 1;
-    engineAspectSet(1);
+    writeEngineAspect(1);
     forceMainLayerGravityOnce();
     forceRereadBounds();
     if (g_status) g_status.text = @"MODE: A+B+C (full)";
-    fprintf(stderr, "[Stretch] MODE A+B+C\n");
     [self hide];
 }
 
 + (void)engPick:(id)sender {
     int v = safeIntFromSender(sender);
     if (v < -1 || v > 2) { [self hide]; return; }
-    engineAspectSet(v);
+    if (v < 0) {
+        g_engineWant = -1;
+        if (g_engLabel) g_engLabel.text = @"ENGINE: native";
+    } else {
+        g_engineWant = v;
+        int ok = writeEngineAspect(v);
+        if (g_engLabel)
+            g_engLabel.text = [NSString stringWithFormat:@"ENGINE: %d (ok %d)", v, ok];
+    }
     [self hide];
 }
 
@@ -430,24 +318,16 @@ static double safeDoubleFromSender(id sender) {
     double a = safeDoubleFromSender(sender);
     if (!(a > 1.0) || !(a < 4.0)) return;
     g_aspect = a;
-    if (g_status) {
+    if (g_status)
         g_status.text = [NSString stringWithFormat:@"ASPECT: %.3f", a];
-    }
     forceRereadBounds();
-    fprintf(stderr, "[Stretch] aspect = %.3f\n", a);
 }
 
 + (void)diag:(id)sender {
     diagnoseEngine();
-    long scan = autoScanAspectFlag();
-    int r = readEngineAspect();
-    if (g_engLabel) {
-        g_engLabel.text = [NSString stringWithFormat:@"read %d  base %p  %@",
-                                                       r, (void *)g_base,
-                                                       scan < 0 ? @"scan none" :
-                                        [NSString stringWithFormat:@"+0x%lX", scan]];
-    }
-    if (g_status) g_status.text = @"DIAG: смотри консоль";
+    if (g_engLabel)
+        g_engLabel.text = [NSString stringWithFormat:@"read %d", readEngineAspect()];
+    if (g_status) g_status.text = @"DIAG: console";
 }
 
 + (void)show {
@@ -466,7 +346,7 @@ static double safeDoubleFromSender(id sender) {
             box.layer.borderWidth = 1;
             box.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.2].CGColor;
 
-            UILabel *title = [self lbl:@"STRETCH v8" size:14];
+            UILabel *title = [self lbl:@"STRETCH GLOBAL v8" size:14];
             title.frame = CGRectMake(0, 10, BW, 20);
 
             g_status = [self lbl:@"MODE: idle" size:11];
@@ -507,7 +387,7 @@ static double safeDoubleFromSender(id sender) {
             }
             y += 42;
 
-            UILabel *eh = [self lbl:@"ENGINE FLAG (UEngine+0x7C)" size:11];
+            UILabel *eh = [self lbl:@"ENGINE FLAG" size:11];
             eh.textColor = [UIColor colorWithWhite:1 alpha:0.65];
             eh.frame = CGRectMake(0, y, BW, 16); y += 20;
             [box addSubview:eh];
@@ -534,12 +414,12 @@ static double safeDoubleFromSender(id sender) {
             }
             y += 38;
 
-            UIButton *db = [self btn:@"DIAG  (console)" h:30];
+            UIButton *db = [self btn:@"DIAG (console)" h:30];
             db.frame = CGRectMake(15, y, BW - 30, 30);
             db.titleLabel.font = [UIFont monospacedSystemFontOfSize:11
                                                           weight:UIFontWeightBold];
             [db addTarget:self action:@selector(diag:)
-                  forControlEvents:UIControlEventTouchUpInside];
+                forControlEvents:UIControlEventTouchUpInside];
             [box addSubview:db];
             y += 36;
 
@@ -559,10 +439,7 @@ static double safeDoubleFromSender(id sender) {
             g_win.rootViewController = [[UIViewController alloc] init];
             g_win.rootViewController.view = host;
             [g_win makeKeyAndVisible];
-        } @catch (id e) {
-            fprintf(stderr, "[Stretch] menu fail: %s\n", [[e description] UTF8String]);
-            [self hide];
-        }
+        } @catch (id e) { [self hide]; }
     });
 }
 
@@ -606,7 +483,7 @@ static void installGesture(void) {
 __attribute__((constructor))
 static void init_stretch(void) {
     @autoreleasepool {
-        fprintf(stderr, "[Stretch] v8 init\n");
+        fprintf(stderr, "[Stretch] Global v8 init\n");
 
         dispatch_async(dispatch_get_main_queue(), ^{
             @try {
@@ -615,24 +492,17 @@ static void init_stretch(void) {
                 if (mb) {
                     orig_bounds = (CGRect(*)(id, SEL))method_getImplementation(mb);
                     method_setImplementation(mb, (IMP)hook_bounds);
-                    fprintf(stderr, "[Stretch] bounds hook OK\n");
                 }
-            } @catch (id e) {
-                fprintf(stderr, "[Stretch] bounds hook fail\n");
-            }
+            } @catch (id e) {}
         });
 
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(7.0 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
             g_base = findGameBase();
-            fprintf(stderr, "[Stretch] base=%p engine=%p\n",
-                    (void *)g_base, genginePtrSafe());
-
+            fprintf(stderr, "[Stretch] base=%p\n", (void *)g_base);
             g_spoofOn = 1;
-            engineAspectSet(1);
+            writeEngineAspect(1);
             forceRereadBounds();
-
-            fprintf(stderr, "[Stretch] default = A+B\n");
         });
 
         dispatch_async(dispatch_get_main_queue(), ^{ installGesture(); });
