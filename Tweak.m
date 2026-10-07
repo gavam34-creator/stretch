@@ -16,12 +16,21 @@ extern const char *_dyld_get_image_name(int32_t index);
 
 // =============================================================================
 //  WORKUP STRETCH v8 — GLOBAL BUILD
-//  A) UIScreen.bounds -> выбранный aspect
-//  B) UEngine + UENG_ASPECT_OFF = 1
-//  C) contentsGravity = Resize на Metal-слое
+//  A) UIScreen.bounds -> выбранный aspect (origin не сдвигаем)
+//  B) UEngine + UENG_ASPECT_OFF = 1 (MaintainXFOV) -> стритч без полос
+//  C) contentsGravity = Resize на Metal-слое (KVC, без глобальных хуков)
 //
-//  ВАЖНО: офсеты под Global в GlobalOffsets.h. Если офсет = 0x0,
-//  твик его не трогает и пишет в консоль, что не настроен.
+//  Офсеты: ТОЛЬКО GlobalOffsets.h. 0 = "не настроен", твик не трогает.
+//  Запись идёт через vm_read_overwrite/vm_write, прямого разыменования
+//  нет (arm64e — SIGSEGV не ловится @try/@catch).
+//
+//  НАСТРОЙКА ПОД НОВЫЙ БИЛД (кнопка DIAG в меню):
+//    1. kr != 0                    -> G_GENGINE_OFF неверен
+//    2. GEngine==NULL              -> движок не поднят, ретрай сам ждёт 60с
+//    3. looksLikeUEngine=0         -> G_GENGINE_OFF неверен (чужой объект)
+//    4. WARN вместо OK            -> UENG_ASPECT_OFF неверен, смотри "scan:"
+//    5. всё OK, но полосы остались -> офсеты верны, дело в чтении флага,
+//                                     идём в точку 0x1042C1E28 (RVA 0x42C1E28)
 // =============================================================================
 
 static double        g_aspect    = 4.0 / 3.0;
@@ -109,14 +118,29 @@ static void forceRereadBounds(void) {
 //  B) ПОИСК БАЗЫ + UENGINE
 // =============================================================================
 static uintptr_t findGameBase(void) {
+    const char *want = GLOBAL_IMAGE_NAME;
+    uintptr_t exact = 0, loose = 0;
     for (int32_t i = 0; i < _dyld_image_count(); i++) {
         const char *n = _dyld_get_image_name(i);
         if (!n) continue;
-        if (strstr(n, GLOBAL_IMAGE_NAME)) {
-            return (uintptr_t)_dyld_get_image_header(i);
+        // 1) точное совпадение по basename — чтобы не зацепить чужой дайбл,
+        //    чей путь просто содержит подстроку из имени игры.
+        const char *base = strrchr(n, '/');
+        base = base ? base + 1 : n;
+        if (base && strcmp(base, want) == 0 && !exact) {
+            exact = (uintptr_t)_dyld_get_image_header(i);
         }
+        if (!loose && strstr(n, want)) {
+            loose = (uintptr_t)_dyld_get_image_header(i);
+        }
+        if (exact) break;
     }
-    return 0;
+    uintptr_t r = exact ? exact : loose;
+    if (!r) {
+        fprintf(stderr, "[Stretch] findGameBase: образ '%s' не найден среди %d image(s)\n",
+                want, (int)_dyld_image_count());
+    }
+    return r;
 }
 
 static void *genginePtrSafe(void) {
@@ -139,6 +163,63 @@ static int plausibleEngine(void *e) {
     return 1;
 }
 
+// Автопоиск байта-флага в UEngine, если UENG_ASPECT_OFF неверен.
+// Эвристика: значение 0..2 и в пределах +-16 байт есть непустой 8-байтный
+// указатель (соседнее свойство-указатель, например ViewportClient).
+// Возвращает первый кандидат, остальные печатает.
+static long autoScanAspectFlag(void) {
+    void *e = genginePtrSafe();
+    if (!e) { fprintf(stderr, "[Stretch] scan: engine NULL\n"); return -1; }
+    uintptr_t p = (uintptr_t)e;
+    long found = -1;
+    int n = 0;
+    for (uintptr_t off = 0x50; off <= 0xB0; off++) {
+        uint8_t v = 0;
+        if (!safeRead8(p + off, &v)) continue;
+        if (v > 2) continue;
+        int near = 0;
+        for (int d = 8; d <= 16; d += 8) {
+            void *nb = NULL;
+            if (safeReadPtr(p + off + d, &nb) && nb && (uintptr_t)nb > 0x1000) near = 1;
+            if (safeReadPtr(p + off - d, &nb) && nb && (uintptr_t)nb > 0x1000) near = 1;
+        }
+        if (!near) continue;
+        fprintf(stderr, "[Stretch] scan: +0x%02lX = %u (есть указатель рядом)\n",
+                (unsigned long)off, (unsigned)v);
+        if (found < 0) found = (long)off;
+        n++;
+    }
+    fprintf(stderr, "[Stretch] scan done: %d кандидат(ов)\n", n);
+    return found;
+}
+
+// Жёсткая проверка, что объект действительно UEngine.
+// Нужна именно для Global: там G_GENGINE_OFF неизвестен, и при неверном
+// офсете слот может указывать на любой чужой UObject — запись в него
+// клозит крэш. vtable != NULL (plausibleEngine) для этого слишком слабо.
+//
+// Два сигнала, найденные анализом VNG 4.6 (FUN_102C87418):
+//   - vtable лежит в образе игры (UE код статически линкуется);
+//   - по vtable+0x2D0 / +0x2D8 лежат UEngine::Init и UEngine::Start,
+//     т.е. объекту нужно >= 90 виртуальных методов. У обычного UObject их
+//     единицы, так что посторонний объект отсекается.
+static int looksLikeUEngine(void *e) {
+    if (!plausibleEngine(e)) return 0;
+    if (!g_base) return 1;                // нет базы — проверить нечем, не блокируем
+    uintptr_t vp = 0;
+    void *vt = NULL;
+    if (!safeReadPtr((uintptr_t)e, &vt)) return 0;
+    vp = (uintptr_t)vt;
+    if (vp < g_base || vp > g_base + 0x80000000UL) return 0;
+    void *fInit = NULL, *fStart = NULL;
+    if (!safeReadPtr(vp + 0x2D0, &fInit)) return 0;
+    if (!safeReadPtr(vp + 0x2D8, &fStart)) return 0;
+    uintptr_t fi = (uintptr_t)fInit, fs = (uintptr_t)fStart;
+    if (fi < 0x100000000UL || fi > g_base + 0x80000000UL) return 0;
+    if (fs < 0x100000000UL || fs > g_base + 0x80000000UL) return 0;
+    return 1;
+}
+
 static int readEngineAspect(void) {
     void *e = genginePtrSafe();
     if (!plausibleEngine(e)) return -1;
@@ -149,8 +230,9 @@ static int readEngineAspect(void) {
 
 static int writeEngineAspect(int v) {
     if (v < 0 || v > 2) return 0;
+    if (!G_GENGINE_OFF || !UENG_ASPECT_OFF) return 0;   // офсет не задан
     void *e = genginePtrSafe();
-    if (!plausibleEngine(e)) return 0;
+    if (!looksLikeUEngine(e)) return 0;
     if (!safeWrite8((uintptr_t)e + UENG_ASPECT_OFF, (uint8_t)v)) return 0;
     return 1;
 }
@@ -168,17 +250,29 @@ static void diagnoseEngine(void) {
                                          (vm_address_t)(g_base + G_GENGINE_OFF),
                                          sizeof(void *), (vm_address_t)&e, &sz);
     fprintf(stderr, "[Stretch] DIAG slot kr=%d engine=%p\n", (int)kr, e);
-    if (kr != KERN_SUCCESS || !e || !plausibleEngine(e)) {
-        fprintf(stderr, "[Stretch] DIAG FAIL: движок не найден\n");
+    if (kr != KERN_SUCCESS) {
+        fprintf(stderr, "[Stretch] DIAG FAIL(1): kr=%d (1=PROTECTION, 14=INVALID_ADDRESS)\n",
+                (int)kr);
         return;
     }
+    if (!e) {
+        fprintf(stderr, "[Stretch] DIAG FAIL(2): GEngine==NULL, движок не поднят\n");
+        return;
+    }
+    if (!plausibleEngine(e)) {
+        fprintf(stderr, "[Stretch] DIAG FAIL(3): %p не похож на UObject\n", e);
+        return;
+    }
+
     void *vt = NULL, *vpc = NULL;
     uint8_t flag = 0xFF;
     safeReadPtr((uintptr_t)e, &vt);
     safeReadPtr((uintptr_t)e + UENG_VPCL_OFF, &vpc);
     int fok = safeRead8((uintptr_t)e + UENG_ASPECT_OFF, &flag);
-    fprintf(stderr, "[Stretch] DIAG vtable=%p vpc=%p flag ok=%d val=%u\n",
-            vt, vpc, fok, (unsigned)(fok ? flag : 0));
+    fprintf(stderr, "[Stretch] DIAG vtable=%p vpc@+0x%X=%p flag@+0x%X ok=%d val=%u\n",
+            vt, (unsigned)UENG_VPCL_OFF, vpc,
+            (unsigned)UENG_ASPECT_OFF, fok, (unsigned)(fok ? flag : 0));
+    fprintf(stderr, "[Stretch] DIAG looksLikeUEngine=%d\n", looksLikeUEngine(e));
 
     fprintf(stderr, "[Stretch] DIAG dump:");
     for (int off = 0x50; off <= 0xB0; off += 8) {
@@ -187,7 +281,58 @@ static void diagnoseEngine(void) {
         else                                     fprintf(stderr, " %02X=??", off);
     }
     fprintf(stderr, "\n");
+
+    if (fok && flag <= 2) {
+        fprintf(stderr, "[Stretch] DIAG OK: +0x%X похож на enum (0/1/2)\n",
+                (unsigned)UENG_ASPECT_OFF);
+    } else {
+        fprintf(stderr, "[Stretch] DIAG WARN: +0x%X не 0/1/2 -> автоскан\n",
+                (unsigned)UENG_ASPECT_OFF);
+        autoScanAspectFlag();
+    }
     fprintf(stderr, "[Stretch] ===== /DIAG =====\n");
+}
+
+// Повторная запись флага. Нужна обязательно: на 7-й секунде GEngine может быть
+// ещё NULL, движок поднимается на 15-20-й секунде. Окно 60 секунд.
+// Одна активная цепочка на процесс: новое значение g_engineWant подхватывается
+// на каждой итерации, поэтому параллельные цепочки не нужны.
+static volatile int g_retryRunning = 0;
+
+static void engineAspectRetry(int idx) {
+    if (idx > 40) {
+        g_retryRunning = 0;
+        fprintf(stderr, "[Stretch] engine final: want=%d read=%d overrides=%d\n",
+                g_engineWant, readEngineAspect(), g_engineOverrides);
+        return;
+    }
+    if (g_engineWant < 0) { g_retryRunning = 0; return; }
+
+    int before = readEngineAspect();
+    int ok = writeEngineAspect(g_engineWant);
+    int after = readEngineAspect();
+    if (ok && after != g_engineWant) g_engineOverrides++;
+
+    if (idx <= 2 || (idx % 10) == 0 || ok == 0) {
+        fprintf(stderr, "[Stretch] engine try#%d want=%d ok=%d before=%d after=%d\n",
+                idx, g_engineWant, ok, before, after);
+    }
+    if (idx == 4 || idx == 20 || idx == 40) diagnoseEngine();
+
+    if (g_engineOverrides >= 3) {
+        g_retryRunning = 0;
+        fprintf(stderr, "[Stretch] engine retry STOP: игра перебивает (overrides=%d)\n",
+                g_engineOverrides);
+        return;
+    }
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{ engineAspectRetry(idx + 1); });
+}
+
+static void engineAspectRetryStart(void) {
+    if (g_retryRunning) return;
+    g_retryRunning = 1;
+    engineAspectRetry(1);
 }
 
 // =============================================================================
@@ -284,7 +429,9 @@ static double safeDoubleFromSender(id sender) {
 
 + (void)modeAB:(id)s {
     g_spoofOn = 1;
+    g_engineWant = 1;
     writeEngineAspect(1);
+    engineAspectRetryStart();
     forceRereadBounds();
     if (g_status) g_status.text = @"MODE: A+B (bounds + XFOV)";
     [self hide];
@@ -292,7 +439,9 @@ static double safeDoubleFromSender(id sender) {
 
 + (void)modeABC:(id)s {
     g_spoofOn = 1;
+    g_engineWant = 1;
     writeEngineAspect(1);
+    engineAspectRetryStart();
     forceMainLayerGravityOnce();
     forceRereadBounds();
     if (g_status) g_status.text = @"MODE: A+B+C (full)";
@@ -307,9 +456,15 @@ static double safeDoubleFromSender(id sender) {
         if (g_engLabel) g_engLabel.text = @"ENGINE: native";
     } else {
         g_engineWant = v;
+        g_engineOverrides = 0;
         int ok = writeEngineAspect(v);
+        fprintf(stderr, "[Stretch] engine pick want=%d ok=%d read=%d\n",
+                v, ok, readEngineAspect());
+        engineAspectRetryStart();
+        if (!ok) diagnoseEngine();
         if (g_engLabel)
-            g_engLabel.text = [NSString stringWithFormat:@"ENGINE: %d (ok %d)", v, ok];
+            g_engLabel.text = [NSString stringWithFormat:@"ENGINE: %d (read %d)",
+                                                       v, readEngineAspect()];
     }
     [self hide];
 }
@@ -325,9 +480,16 @@ static double safeDoubleFromSender(id sender) {
 
 + (void)diag:(id)sender {
     diagnoseEngine();
-    if (g_engLabel)
-        g_engLabel.text = [NSString stringWithFormat:@"read %d", readEngineAspect()];
-    if (g_status) g_status.text = @"DIAG: console";
+    long scan = autoScanAspectFlag();
+    int r = readEngineAspect();
+    if (g_engLabel) {
+        g_engLabel.text = [NSString stringWithFormat:@"read %d  +0x%lX", r,
+                           (long)UENG_ASPECT_OFF];
+    }
+    if (g_status) {
+        g_status.text = [NSString stringWithFormat:@"DIAG: read %d, scan +0x%lX",
+                              r, scan < 0 ? (long)UENG_ASPECT_OFF : scan];
+    }
 }
 
 + (void)show {
@@ -502,6 +664,9 @@ static void init_stretch(void) {
             fprintf(stderr, "[Stretch] base=%p\n", (void *)g_base);
             g_spoofOn = 1;
             writeEngineAspect(1);
+            // Всегда, даже если первая запись не удалась: движок может
+            // подняться позже (15-20-я секунда).
+            engineAspectRetryStart();
             forceRereadBounds();
         });
 
